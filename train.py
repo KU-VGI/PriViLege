@@ -56,6 +56,8 @@ def get_command_line_parser():
     parser.add_argument('-start_session', type=int, default=1)
     parser.add_argument('-model_dir', type=str, default=MODEL_DIR, help='loading model parameter from a specific dir')
     parser.add_argument('-set_no_val', action='store_true', help='set validation using test set or no validation')
+    parser.add_argument('-ckpt_dir', type=str, default=None,
+                        help='save a resume state here after every base epoch and session; resume from it if present')
 
     # about training
     parser.add_argument('-gpu', default='2, 3')
