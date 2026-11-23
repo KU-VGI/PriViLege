@@ -321,7 +321,7 @@ class ViT_FSCILTrainer(Trainer):
                 self.model.eval()
                 self.model.module.mode = 'avg_cos'
                 tsl, tsa, logs = test(self.model, testloader, 0, args, session,self.word_info)
-                acc_df = acc_df.append(logs, ignore_index=True)
+                acc_df = pd.concat([acc_df, pd.DataFrame([logs])], ignore_index=True)
                 
                 print("Build Vision ProtoType")
 

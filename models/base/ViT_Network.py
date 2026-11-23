@@ -14,7 +14,7 @@ from models.vision_transformer import VisionTransformer
 #todo PKT with B-Prompt ==> Prefix Tuning 
 #todo Need Something to focus on domain specific knowledge learning 
 #todo finc inciteness from the Novel Category Discovery 
-import open_clip as clip
+# import open_clip as clip
 class ViT_MYNET(nn.Module):
 
     def __init__(self, args, mode=None):
