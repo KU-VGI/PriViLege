@@ -12,8 +12,8 @@ Runs the authors' code (branch `colab-fixes` of `AkilaDissanayake/PriViLege`) fo
 **Table 1** (CUB200, CIFAR-100, miniImageNet), **Tables 3 and 4** (ablations on CUB200) and **Figure 3** (PriViLege on CLIP, CIFAR-100).
 Every experiment cell ends with a table of our numbers next to the paper's.
 
-- **GPU:** A100 (or L4). A T4 (16 GB) runs out of memory at batch 128.
-  VS Code: Select Kernel → Colab → **New Colab Server** → GPU. Press **Ctrl+S** after a cell finishes so its output is saved in the .ipynb.
+- **GPU:** A100 is fastest. On a 16 GB GPU (T4) the runner turns on gradient checkpointing (`-grad_ckpt`) so batch 128 fits:
+  same results, slower runs. VS Code: Select Kernel → Colab → **New Colab Server** → GPU. Press **Ctrl+S** after a cell finishes so its output is saved in the .ipynb.
 - **Every Colab session:** run the Setup cells (1a–1e), then the experiment cell you want.
 - **If Colab stops:** run Setup again and re-run the same cell. Finished runs are skipped; an interrupted run continues from its last checkpoint in Drive (`MyDrive/PriViLege/resume/`).
 - Datasets download into `MyDrive/PriViLege/datasets/` the first time they are needed.
@@ -62,7 +62,9 @@ assert timm.__version__ == '0.6.13', 'Restart the session (Runtime -> Restart se
 assert torch.cuda.is_available(), ('No GPU: this is a CPU runtime and every run would fail. Browser: Runtime -> Change runtime '
                                    'type -> A100/L4 GPU. VS Code: Select Kernel -> Colab -> New Colab Server -> GPU.')
 GPU = torch.cuda.get_device_name(0)
-print('GPU:', GPU)
+GPU_GB = torch.cuda.get_device_properties(0).total_memory / 2**30
+GRAD_CKPT = GPU_GB < 20   # T4 (16 GB): batch 128 only fits with gradient checkpointing (same results, slower)
+print(f'GPU: {GPU} ({GPU_GB:.0f} GB)' + (' -> -grad_ckpt on' if GRAD_CKPT else ''))
 ''')
 
 code(r'''
@@ -193,7 +195,7 @@ def run(name, dataset, seed, force=False, batch_size=128):
     if done and not force:
         print(f"== {name} | {dataset} | seed {seed}: already finished (A_Base {done['A_Base']}, "
               f"A_Last {done['A_Last']}, A_Avg {done['A_Avg']}). Skipping.")
-        return
+        return True
     if force:
         shutil.rmtree(ckpt, ignore_errors=True)
     prepare(dataset)
@@ -204,7 +206,8 @@ def run(name, dataset, seed, force=False, batch_size=128):
     cmd = (f'python train.py -project base -dataset {dataset} -base_mode ft_dot -new_mode avg_cos -gamma 0.1 '
            f'-lr_base 2e-4 -lr_new 2e-4 -decay 0.0005 -epochs_base {epochs_base} -epochs_new {epochs_new} '
            f'-schedule Cosine -milestones 20 30 45 -gpu 0 -temperature 16 -start_session 0 '
-           f'-batch_size_base {batch_size} -seed {seed} {e["flags"]} -out {name} -dataroot {DATA} -ckpt_dir {ckpt}')
+           f'-batch_size_base {batch_size} -seed {seed} {e["flags"]} -out {name} -dataroot {DATA} -ckpt_dir {ckpt}'
+           + (' -grad_ckpt' if GRAD_CKPT else ''))
     print(cmd, '\n')
     with open(log, 'a') as f:
         f.write(f"\n===== {'resume' if resumed else 'start'} {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
@@ -218,7 +221,7 @@ def run(name, dataset, seed, force=False, batch_size=128):
     if not hits:
         msg = describe_state(state_json) if os.path.exists(state_json) else 'no checkpoint saved yet'
         print(f'\n!! Run stopped before finishing ({msg}). Re-run this cell to continue. Log: {log}')
-        return
+        return False
     dst = f'{DRIVE}/results/{name}/{dataset}/seed{seed}'
     os.makedirs(dst, exist_ok=True)
     shutil.copy(hits[-1], f'{dst}/results.txt')
@@ -230,17 +233,19 @@ def run(name, dataset, seed, force=False, batch_size=128):
         if new_file:
             w.writerow(['name', 'dataset', 'seed', 'flags', 'batch', 'gpu', 'commit', 'A_Base', 'A_Last', 'A_Avg',
                         'sessions', 'minutes', 'resumed', 'date'])
-        w.writerow([name, dataset, seed, e['flags'], batch_size, GPU, COMMIT, f'{a_base:.2f}', f'{a_last:.2f}',
+        w.writerow([name, dataset, seed, e['flags'] + (' -grad_ckpt' if GRAD_CKPT else ''), batch_size, GPU, COMMIT, f'{a_base:.2f}', f'{a_last:.2f}',
                     f'{a_avg:.2f}', json.dumps(accs), f'{minutes:.1f}', 'yes' if resumed else 'no',
                     time.strftime('%Y-%m-%d %H:%M')])
     shutil.rmtree(ckpt, ignore_errors=True)   # finished: free the Drive space of its resume state
     print(f'\n== {name} | {dataset} | seed {seed}: A_Base {a_base:.2f} | A_Last {a_last:.2f} | A_Avg {a_avg:.2f} | {minutes:.1f} min')
+    return True
 
 def run_all(name, datasets=None, seeds=None):
     e = EXP[name]
     for ds in datasets or e['datasets']:
         for s in seeds or e.get('seeds', SEEDS):
-            run(name, ds, s)
+            if not run(name, ds, s):   # stop at the first failure instead of failing every remaining seed
+                raise SystemExit(f'Stopped: {name} | {ds} | seed {s} did not finish. Fix the error above, then re-run.')
 
 PLAN = [(n, ds, s) for n, e in EXP.items() if n != 'smoke'
         for ds in e['datasets'] for s in e.get('seeds', SEEDS)]
@@ -367,7 +372,7 @@ md(r'''
 Catches environment, data and code problems before the long runs. It passes if the log reaches `Incremental session: [8]`
 and the last line prints A_Base / A_Last / A_Avg. The numbers themselves are not meaningful.
 ''')
-code("run('smoke', 'cifar100', seed=1)")
+code("assert run('smoke', 'cifar100', seed=1), 'Smoke test failed: see the error above'")
 
 md(r'''
 ## 5. Table 1: PriViLege on the three benchmarks (5 seeds each)
