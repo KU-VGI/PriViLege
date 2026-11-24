@@ -12,11 +12,13 @@
 # trained with; the OpenAI copy used QuickGELU.
 import torch
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 
 class PromptedVisionTransformer(nn.Module):
-    def __init__(self, visual, prompt_length=2, adapt_layer=(0, 1)):
+    def __init__(self, visual, prompt_length=2, adapt_layer=(0, 1), grad_ckpt=False):
         super().__init__()
+        self.grad_ckpt = grad_ckpt   # recompute blocks in backward: same results, less GPU memory
         assert visual.transformer.batch_first, 'expects open_clip >= 2.24 (batch-first transformer)'
         width = visual.class_embedding.shape[0]
         # official open_clip modules (weights included)
@@ -62,11 +64,14 @@ class PromptedVisionTransformer(nn.Module):
             pos_tkn = self.prompt + self.positional_embedding[0, :].to(x.dtype).expand(self.prompt_length, -1)
             x = torch.cat([x[:, :1], pos_tkn.expand(x.shape[0], -1, -1), x[:, 1:]], dim=1)   # [CLS, Vision, Language, patches]
         x = self.ln_pre(x)
+        ckpt = self.grad_ckpt and self.training and torch.is_grad_enabled()
+        run = (lambda f, *a: checkpoint(f, *a, use_reentrant=False)) if ckpt else (lambda f, *a: f(*a))
         for i, block in enumerate(self.transformer.resblocks):
             if B_tuning and i in self.transformer.adapt_layer:
-                x = self._prompted_block(block, x, self.expert_prompt[self.transformer.adapt_layer.index(i)])
+                x = run(lambda h, p, blk=block: self._prompted_block(blk, h, p), x,
+                        self.expert_prompt[self.transformer.adapt_layer.index(i)])
             else:
-                x = block(x)
+                x = run(block, x)
         x = self.ln_post(x)
         if self.proj is not None:
             x = x @ self.proj

@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from models.resnet18_encoder import *
 from models.resnet20_cifar import *
 from models.resnet18_cifar import resnet18_cifar
@@ -114,13 +115,18 @@ class ViT_MYNET(nn.Module):
         taskblock=[0,1]
         if len(taskblock) == len(self.encoder.blocks) or  0 in taskblock:
             latent_feat = x
+        # -grad_ckpt: recompute each block in the backward pass instead of storing its activations.
+        # Same results, far less GPU memory (needed for batch 128 on a 16 GB T4).
+        ckpt = getattr(self.args, 'grad_ckpt', False) and self.training and torch.is_grad_enabled()
+        run = (lambda f, *a: checkpoint(f, *a, use_reentrant=False)) if ckpt else (lambda f, *a: f(*a))
         for block_idx, block in enumerate(self.encoder.blocks):
             if block_idx in taskblock:
-                latent_feat = self._pk_tuning(block, latent_feat, prefix_tkn[taskblock.index(block_idx)], eval=eval)
+                latent_feat = run(lambda h, p, blk=block: self._pk_tuning(blk, h, p, eval=eval),   # blk bound now: recompute runs later
+                                  latent_feat, prefix_tkn[taskblock.index(block_idx)])
             elif block_idx == 0:
-                latent_feat = block(x)
+                latent_feat = run(block, x)
             else:
-                latent_feat = block(latent_feat)
+                latent_feat = run(block, latent_feat)
         
         feat = self.encoder.norm(latent_feat)
         return feat

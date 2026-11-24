@@ -76,6 +76,8 @@ def get_command_line_parser():
     parser.add_argument('-ED_hp', type=float, default=0.1)
     
     parser.add_argument('-LT', action='store_true')
+    parser.add_argument('-grad_ckpt', action='store_true',
+                        help='gradient checkpointing: same results, less GPU memory (for 16 GB GPUs such as a T4)')
     parser.add_argument('-WC', action='store_true')
     parser.add_argument('-MP', action='store_true')
     

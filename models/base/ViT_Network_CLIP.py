@@ -36,7 +36,8 @@ class ViT_MYNET_CLIP(nn.Module):
         # encoder gets the PriViLege prompts. (The authors instead loaded these weights into their own copy
         # of OpenAI's VisionTransformer with strict=False; see models/CLIP_prompt.py.)
         self.text_encoder, _, _ = clip.create_model_and_transforms('ViT-B/16', pretrained='laion2b_s34b_b88k')
-        self.encoder = PromptedVisionTransformer(copy.deepcopy(self.text_encoder.visual))
+        self.encoder = PromptedVisionTransformer(copy.deepcopy(self.text_encoder.visual),
+                                                 grad_ckpt=getattr(args, 'grad_ckpt', False))
         self.tokenizer = clip.get_tokenizer('ViT-B-16')
 
         self.fc = nn.Linear(self.num_features, self.args.num_classes, bias=False)
