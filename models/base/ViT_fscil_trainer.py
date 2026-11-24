@@ -24,8 +24,13 @@ class ViT_FSCILTrainer(Trainer):
         self.set_log_path()
 
         self.args = set_up_datasets(self.args)
-        self.model = ViT_MYNET(self.args, mode=self.args.base_mode)
-        
+        if self.args.pret_clip:
+            # Restored from the authors' compiled trainer: PriViLege on CLIP (paper Figure 3)
+            from .ViT_Network_CLIP import ViT_MYNET_CLIP
+            self.model = ViT_MYNET_CLIP(self.args, mode=self.args.base_mode)
+        else:
+            self.model = ViT_MYNET(self.args, mode=self.args.base_mode)
+
         if self.args.LT:
             print("Tuning Layer!!")
             if self.args.pret_clip:
@@ -215,6 +220,8 @@ class ViT_FSCILTrainer(Trainer):
                         for p in block.parameters():
                             p.requires_grad=False
                     for p in self.model.module.encoder.transformer.key_comp.parameters():
+                        p.requires_grad = False
+                    for p in self.model.module.encoder.transformer.val_comp.parameters():   # restored from the authors' compiled trainer
                         p.requires_grad = False
                     self.model.module.encoder.expert_prompt.requires_grad=False
                 elif args.ft:
