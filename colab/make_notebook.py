@@ -236,13 +236,13 @@ def prepare(dataset):
         pass
     elif os.path.exists(src):
         print(f'Extracting {archive} ...')
-        get_ipython().system(f'tar -xf "{src}" -C {DATA}')
+        get_ipython().system(f'tar -xf "{src}" -C {DATA} --no-same-owner')
     elif dataset == 'cifar100':
         print('CIFAR-100 is not in Drive yet; train.py downloads it (copied to Drive afterwards).')
     else:
         download_to_drive(dataset)
         print(f'Extracting {archive} ...')
-        get_ipython().system(f'tar -xf "{src}" -C {DATA}')
+        get_ipython().system(f'tar -xf "{src}" -C {DATA} --no-same-owner')
     if dataset == 'mini_imagenet':
         # Always the repo's split files: the standard FSCIL split (100 classes x 500 train / 100 test) that the loader and
         # the session lists expect, even if the archive ships a different split/ folder.
