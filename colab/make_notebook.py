@@ -8,38 +8,41 @@ def code(s): cells.append({'cell_type': 'code', 'metadata': {}, 'execution_count
 md(r'''
 # PriViLege (CVPR 2024): reproduction on Colab or RunPod
 
-Runs the authors' code (branch `colab-fixes` of `AkilaDissanayake/PriViLege`) for the paper's results:
-**Table 1** (CUB200, CIFAR-100, miniImageNet), **Tables 3 and 4** (ablations on CUB200) and **Figure 3** (PriViLege on CLIP, CIFAR-100).
-Every experiment cell ends with a table of our numbers next to the paper's.
+Runs the authors' code (branch `t4-fixes` of `AkilaDissanayake/PriViLege`: their code plus the fixes needed on today's
+PyTorch and on a 16 GB T4) for the paper's results: **Table 1** (CUB200, CIFAR-100, miniImageNet), **Tables 3 and 4**
+(ablations on CUB200) and **Figure 3** (PriViLege on CLIP, CIFAR-100). Every experiment cell ends with our numbers next to
+the paper's.
 
-- **GPU:** A100 is fastest. On a 16 GB GPU (T4) the runner turns on gradient checkpointing (`-grad_ckpt`) so batch 128 fits:
-  same results, slower runs. VS Code: Select Kernel → Colab → **New Colab Server** → GPU. Press **Ctrl+S** after a cell finishes so its output is saved in the .ipynb.
-- **Every Colab session:** run the Setup cells (1a–1e), then the experiment cell you want.
-- **If Colab stops:** run Setup again and re-run the same cell. Finished runs are skipped; an interrupted run continues from its last checkpoint in Drive (`PriViLege/resume/`).
-- Datasets download into `PriViLege/datasets/` the first time they are needed.
+**Fresh start.** Every log, result and resume state of this reproduction lives in `PriViLege/runs_v2/` in the shared Drive
+folder. Older runs (made before the L_ED NaN fix) stay untouched in `PriViLege/logs`, `results` and `resume` and are never
+read, so every experiment here starts from the beginning. Datasets in `PriViLege/datasets/` are shared and reused.
 
-**Drive: the shared project folder.** Datasets, logs, results and resume states live in one shared folder
-(https://drive.google.com/drive/folders/1UuLlbEoUMMv8ShyRU-x117Ir3ePqYPeq), owned by a friend's Google account. Do this once
-for every Google account that will run the notebook:
-1. The owner opens the folder → **Share** → adds that Google account as **Editor**.
-2. Signed in as that account, open the link above (or drive.google.com → **Shared with me**), right-click the folder →
-   **Organize → Add shortcut** → **My Drive**.
+### Once only
+1. **Drive.** The folder owner shares https://drive.google.com/drive/folders/1UuLlbEoUMMv8ShyRU-x117Ir3ePqYPeq with your
+   Google account as **Editor**. Signed in as that account, open the link, right-click the folder → **Organize → Add
+   shortcut → My Drive** (Colab can only see a shared folder through a shortcut).
+2. **RunPod only.** On your PC (PowerShell): `winget install Rclone.Rclone`, open a new terminal, run
+   `rclone authorize "drive"`, sign in with that same account and copy the token it prints (one line, `{...}`).
 
-Colab can only see a shared folder through such a shortcut. Cell 1a finds it by its folder id, so renaming or moving the
-shortcut is fine, and it checks the folder is writable. The owner needs no shortcut. Files the runs create there (logs,
-results, resume states: small) count against the storage of the account that runs Colab, because it owns them. The dataset
-archives count against whoever uploaded them, so let the owner's Drive keep those.
+### Every session (Colab or RunPod)
+Run **1a → 1a-2 → 1b → 1c → 1d → 1e**, then the two cells of section 2, then **3. Status**.
+- Colab: Runtime → Change runtime type → **T4 GPU** (or better). If 1c stops at the timm check: Runtime → **Restart
+  session**, then run 1a–1c again.
+- RunPod: a PyTorch template, an RTX 4090 or 3090 (24 GB: no `-grad_ckpt`, faster), a **100 GB volume** on `/workspace`.
+  In a JupyterLab terminal: `cd /workspace && wget https://raw.githubusercontent.com/AkilaDissanayake/PriViLege/t4-fixes/colab/PriViLege_colab.ipynb`,
+  open it, and paste the rclone token when 1a-2 asks (once per volume).
 
-**RunPod (or any other Jupyter GPU machine).** The same notebook runs there: cell 1a notices it is not on Colab and keeps
-everything in `/workspace/privilege_drive` on the pod's persistent volume. Cell 1a-2 copies the shared Drive folder's
-`datasets/`, `logs/` and `results/` to the pod with rclone, and every run copies its log and results back to the Drive
-folder (as `results/runs_runpod.csv`, so it never overwrites rows written from Colab). Pick a 24 GB GPU (RTX 4090, or the
-paper's RTX 3090): batch 128 then fits without `-grad_ckpt`. Use a RunPod PyTorch template with a volume on `/workspace`.
+### Order of the experiments
+1. **4. Smoke test** (T4 ~15 min). Must end with `== smoke | cifar100 | seed 1: A_Base …`.
+2. **4b. Quick checks** (T4 ~45 min): one real CUB200 run and CLIP zero-shot, printed next to the paper's numbers.
+   If both are close, the code is confirmed: move to RunPod for the rest.
+3. **5. Table 1** CUB200 first, then **6. Table 3** and **7. Table 4** (all CUB200, cheap), then Table 1 CIFAR-100 and
+   miniImageNet (about 2 h per run on a T4), then **8. Figure 3** (CLIP; run one `clip_PKT_ED_SKD` seed first), then **9**.
 
-Link rclone to Google Drive once (the token is saved on the volume, in `/workspace/rclone.conf`, never in the notebook):
-1. On your own PC (PowerShell): `winget install Rclone.Rclone`, open a new terminal, run `rclone authorize "drive"`.
-   A browser opens: sign in with the Google account that has Editor access to the shared folder.
-2. Copy the token the terminal prints (one line, from `{` to `}`), run cell 1a-2 on the pod and paste it when asked.
+### If anything stops
+Re-run the setup cells and the same experiment cell: finished runs are skipped, an interrupted run resumes from its last
+saved epoch or session. Training stops on its own at the first NaN loss (a `FloatingPointError`): send the last 30 lines of
+the output. On RunPod every finished run is copied to the shared Drive folder (`runs_v2/`) at once.
 ''')
 
 md(r'''
@@ -91,8 +94,13 @@ try:
     open(probe, 'w').close(); os.remove(probe)
 except OSError as e:
     raise PermissionError(f'{DRIVE} is read-only for this account: ask the folder owner to share it with you as Editor.') from e
-for d in ['datasets', 'logs', 'results']:
-    os.makedirs(f'{DRIVE}/{d}', exist_ok=True)
+# Every log, result and resume state of this reproduction goes to RUNS. Runs made before the NaN fix are in DRIVE/logs,
+# DRIVE/results and DRIVE/resume and are never read, so nothing is resumed or skipped because of them.
+RUN_SET = 'runs_v2'
+RUNS = f'{DRIVE}/{RUN_SET}'
+os.makedirs(f'{DRIVE}/datasets', exist_ok=True)
+for d in ['logs', 'results', 'resume']:
+    os.makedirs(f'{RUNS}/{d}', exist_ok=True)
 os.makedirs(DATA, exist_ok=True)
 print('Running on', 'Colab' if ON_COLAB else 'RunPod / local Jupyter', '| folder:', DRIVE, '| contents:', sorted(os.listdir(DRIVE)))
 !nvidia-smi --query-gpu=name,memory.total --format=csv
@@ -134,12 +142,13 @@ if not ON_COLAB:
         raise RuntimeError('Cannot read the shared Drive folder with rclone. Check that the account you signed in with has '
                            f'Editor access, or delete {RCLONE_CONF} and run this cell again. ' + r.stderr[-500:])
     print('Shared Drive folder contents:', r.stdout.split())
-    for d in ['datasets', 'logs', 'results']:   # --update: never replace a newer file on the pod with an older one
+    SYNC = ['datasets', f'{RUN_SET}/logs', f'{RUN_SET}/results']   # resume states stay on the volume
+    for d in SYNC:   # --update: never replace a newer file on the pod with an older one
         print(f'Copying Drive {d}/ to the pod ...')
         get_ipython().system(f'{RCLONE} --config {RCLONE_CONF} copy gdrive:{d} "{DRIVE}/{d}" --update --stats-one-line -P')
 
     def drive_push():
-        for d in ['logs', 'results']:
+        for d in [f'{RUN_SET}/logs', f'{RUN_SET}/results']:
             r = rclone('copy', f'{DRIVE}/{d}', f'gdrive:{d}', '--update')
             if r.returncode != 0:
                 print(f'!! Could not copy {d}/ to Drive (the files are safe on the pod volume):', r.stderr[-300:])
@@ -207,14 +216,16 @@ def prepare(dataset):
         download_to_drive(dataset)
         print(f'Extracting {archive} ...')
         get_ipython().system(f'tar -xf "{src}" -C {DATA}')
-    if dataset == 'mini_imagenet' and not os.path.exists(f'{DATA}/miniimagenet/split/train.csv'):
-        os.makedirs(f'{DATA}/miniimagenet/split', exist_ok=True)   # the same csv files ship with the repo
+    if dataset == 'mini_imagenet':
+        # Always the repo's split files: the standard FSCIL split (100 classes x 500 train / 100 test) that the loader and
+        # the session lists expect, even if the archive ships a different split/ folder.
+        os.makedirs(f'{DATA}/miniimagenet/split', exist_ok=True)
         get_ipython().system(f'cp {REPO}/data/index_list/mini_imagenet/*.csv {DATA}/miniimagenet/split/')
 
 def download_to_drive(dataset):
     import gdown
     archive = ARCHIVES[dataset][0]
-    tmp, dst = f'/content/{archive}', f'{DRIVE}/datasets/{archive}'
+    tmp, dst = f'{DATA}/{archive}.download', f'{DRIVE}/datasets/{archive}'   # DATA exists on Colab and RunPod
     print(f'{archive} is not in Drive: downloading it from the CEC Google Drive folder ...')
     gdown.download(id=GDRIVE_IDS[dataset], output=tmp, quiet=False)
     if not os.path.exists(tmp) or os.path.getsize(tmp) < 10_000_000:
@@ -257,8 +268,8 @@ import matplotlib.pyplot as plt
 from IPython.display import display, Markdown
 
 # One results file per kind of machine, so a RunPod sync never overwrites rows written from Colab (and vice versa)
-LOG_CSV = f'{DRIVE}/results/runs.csv' if ON_COLAB else f'{DRIVE}/results/runs_runpod.csv'
-RESUME  = f'{DRIVE}/resume'
+LOG_CSV = f'{RUNS}/results/runs.csv' if ON_COLAB else f'{RUNS}/results/runs_runpod.csv'
+RESUME  = f'{RUNS}/resume'
 SEEDS   = [1, 2, 3, 4, 5]
 VIT     = '-vit -comp_out 1'
 
@@ -288,7 +299,7 @@ def parse_results(path):
 
 def finished_runs():
     done = {}
-    for path in sorted(glob.glob(f'{DRIVE}/results/runs*.csv')):   # runs.csv (Colab) and runs_runpod.csv (RunPod)
+    for path in sorted(glob.glob(f'{RUNS}/results/runs*.csv')):   # runs.csv (Colab) and runs_runpod.csv (RunPod)
         with open(path, newline='') as f:
             done.update({(r['name'], r['dataset'], int(r['seed'])): r for r in csv.DictReader(f)})
     return done
@@ -314,7 +325,7 @@ def run(name, dataset, seed, force=False, batch_size=128):
     state_json = f'{ckpt}/resume_state.json'
     resumed = os.path.exists(state_json)
     print(f'>> {name} | {dataset} | seed {seed}: ' + (f'RESUMING, {describe_state(state_json)}' if resumed else 'starting'))
-    log = f'{DRIVE}/logs/{name}_{dataset}_seed{seed}.log'
+    log = f'{RUNS}/logs/{name}_{dataset}_seed{seed}.log'
     cmd = (f'python train.py -project base -dataset {dataset} -base_mode ft_dot -new_mode avg_cos -gamma 0.1 '
            f'-lr_base 2e-4 -lr_new 2e-4 -decay 0.0005 -epochs_base {epochs_base} -epochs_new {epochs_new} '
            f'-schedule Cosine -milestones 20 30 45 -gpu 0 -temperature 16 -start_session 0 '
@@ -335,9 +346,11 @@ def run(name, dataset, seed, force=False, batch_size=128):
         print(f'\n!! Run stopped before finishing ({msg}). Re-run this cell to continue. Log: {log}')
         drive_push()
         return False
-    dst = f'{DRIVE}/results/{name}/{dataset}/seed{seed}'
+    dst = f'{RUNS}/results/{name}/{dataset}/seed{seed}'
     os.makedirs(dst, exist_ok=True)
     shutil.copy(hits[-1], f'{dst}/results.txt')
+    for pth in glob.glob(f'{os.path.dirname(hits[-1])}/*.pth'):   # model checkpoints (0.35-1 GB each): not needed for results
+        os.remove(pth)
     accs = parse_results(hits[-1])
     a_base, a_last, a_avg = accs[0], accs[-1], sum(accs) / len(accs)
     new_file = not os.path.exists(LOG_CSV)
@@ -489,6 +502,25 @@ and the last line prints A_Base / A_Last / A_Avg. The numbers themselves are not
 code("assert run('smoke', 'cifar100', seed=1), 'Smoke test failed: see the error above'")
 
 md(r'''
+## 4b. Quick checks on real data (before the full tables)
+One real CUB200 run (Table 1, seed 1; T4 ~30 min) and CLIP zero-shot (Figure 3, no training). Within about 1-2 points of the
+paper means the code is working: continue with the tables (on RunPod if you like). Far off: stop and check the log.
+''')
+
+code(r'''
+assert run('PriViLege', 'cub200', seed=1), 'CUB200 run failed: see the error above'
+assert run('clip_zeroshot', 'cifar100', seed=1), 'CLIP zero-shot failed: see the error above'
+done = finished_runs()
+for name, ds, paper in [('PriViLege', 'cub200', PAPER['Table 1'][('PriViLege', 'cub200')]),
+                        ('clip_zeroshot', 'cifar100', PAPER['Figure 3'][('clip_zeroshot', 'cifar100')])]:
+    r = done[(name, ds, 1)]
+    ours = [float(r[m]) for m in METRICS]
+    print(f"{name:14s} {ds:9s} A_Base / A_Last / A_Avg  ours {ours[0]:.2f} / {ours[1]:.2f} / {ours[2]:.2f}"
+          f"  paper {paper[0][0]:.2f} / {paper[1][0]:.2f} / {paper[2][0]:.2f}"
+          f"  | diff {ours[0] - paper[0][0]:+.2f} / {ours[1] - paper[1][0]:+.2f} / {ours[2] - paper[2][0]:+.2f}")
+''')
+
+md(r'''
 ## 5. Table 1: PriViLege on the three benchmarks (5 seeds each)
 CUB200: 100 base classes + 10 sessions of 10-way 5-shot. CIFAR-100 and miniImageNet: 60 base classes + 8 sessions of 5-way 5-shot.
 ''')
@@ -528,7 +560,7 @@ code("for t in ['Table 1', 'Table 3', 'Table 4', 'Figure 3']:\n    compare(t)")
 
 md(r'''
 ## 10. Free disk space (optional)
-Each run leaves large `.pth` checkpoints on the Colab disk. Results and resume states are already in Drive, so this is safe.
+Finished runs delete their `.pth` checkpoints automatically; this removes any left by interrupted or older runs.
 ''')
 code("!find {REPO}/checkpoint -name '*.pth' -delete\n!df -h /content | tail -1")
 
