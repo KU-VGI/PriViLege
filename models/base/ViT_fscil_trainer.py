@@ -198,7 +198,8 @@ class ViT_FSCILTrainer(Trainer):
         resume = None
         start_session, start_epoch = args.start_session, 0
         if self._resume_enabled() and os.path.exists(self._resume_path()):
-            resume = self._load_resume()
+            resume = self._load_resume()   # None if the saved state held NaN/inf weights: start fresh
+        if resume is not None:
             result_list = [args] + resume['result_list']
             if resume['phase'] == 'base':
                 start_session, start_epoch = 0, resume['epoch'] + 1
@@ -413,13 +414,23 @@ class ViT_FSCILTrainer(Trainer):
         keep = tuple('module.encoder.blocks.%d.' % i for i in range(self.args.taskblock)) + ('module.encoder.head.',)
         return {k: v for k, v in state.items() if not k.startswith('module.encoder.') or k.startswith(keep)}
 
+    @staticmethod
+    def _nonfinite_keys(state_dict):
+        return [k for k, v in state_dict.items()
+                if torch.is_tensor(v) and v.is_floating_point() and not torch.isfinite(v).all()]
+
     def _save_resume(self, phase, session, epoch, result_list, optimizer=None, scheduler=None):
         if not self._resume_enabled():
             return
+        model_state = self._model_state_for_resume()
+        bad = self._nonfinite_keys(model_state)
+        if bad:   # never replace the last good resume state with broken weights
+            raise FloatingPointError('Not saving the resume state: NaN/inf weights in {} (e.g. {}). The previous resume '
+                                     'state is kept.'.format(len(bad), bad[:3]))
         state = {
             'phase': phase, 'session': session, 'epoch': epoch,
             'fingerprint': self._resume_fingerprint(),
-            'model': self._model_state_for_resume(),
+            'model': model_state,
             'optimizer': optimizer.state_dict() if optimizer is not None else None,
             'scheduler': scheduler.state_dict() if scheduler is not None else None,
             'trlog': self.trlog,
@@ -452,6 +463,12 @@ class ViT_FSCILTrainer(Trainer):
             raise ValueError('Resume state in {} was saved with different arguments.\nsaved: {}\nnow:   {}\n'
                              'Delete that folder or use another -ckpt_dir.'.format(
                                  self.args.ckpt_dir, state['fingerprint'], self._resume_fingerprint()))
+        bad = self._nonfinite_keys(state['model'])
+        if bad:   # e.g. saved by the code from before the L_ED NaN fix: unusable, so set it aside and start fresh
+            os.replace(path, path + '.nan')
+            print('[resume] {} has NaN/inf weights ({} tensors, e.g. {}): moved it to {}.nan and starting this run '
+                  'from scratch.'.format(path, len(bad), bad[:3], path))
+            return None
         missing, unexpected = self.model.load_state_dict(state['model'], strict=False)
         not_encoder = [k for k in missing if not k.startswith('module.encoder.')]
         if unexpected or not_encoder:
