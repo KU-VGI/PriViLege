@@ -95,6 +95,9 @@ def get_command_line_parser():
     parser.add_argument('-scratch', action='store_true')
     parser.add_argument('-taskblock', type=int, default=2)
     parser.add_argument('-ft', action='store_true')
+    parser.add_argument('-plain_ft', action='store_true',
+                        help='with -ft: plain fine-tuning baseline (paper Table 3). No prompts: every path uses the ViT '
+                             'CLS feature, the same feature the prototypes are built from, and the classifier is trained')
     parser.add_argument('-lp', action='store_true')
     parser.add_argument('-PKT_tune_way', type=int, default=1)
     

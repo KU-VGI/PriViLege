@@ -309,8 +309,9 @@ EXP = {
     'smoke':           dict(datasets=['cifar100'], flags=f'{VIT} -LT -ED -SKD', epochs_base=1, epochs_new=1),
     # Table 1 (and the 'Ours' row of Table 3)
     'PriViLege':       dict(datasets=['cifar100', 'cub200', 'mini_imagenet'], flags=f'{VIT} -LT -ED -SKD'),
-    # Table 3: Baseline = fine-tuning + prototype classifier (the released -ft option), then the PKT ablations
-    'abl_Baseline':    dict(datasets=['cub200'], flags=f'{VIT} -ft'),
+    # Table 3: Baseline = fine-tuning + prototype classifier, then the PKT ablations. -ft alone (the old 'abl_Baseline')
+    # kept the prompts at random values and the classifier frozen; -plain_ft uses no prompts and trains the classifier.
+    'abl_FT':          dict(datasets=['cub200'], flags=f'{VIT} -ft -plain_ft'),
     'abl_PKT':         dict(datasets=['cub200'], flags=f'{VIT} -LT'),
     'abl_PKT_ED':      dict(datasets=['cub200'], flags=f'{VIT} -LT -ED'),
     'abl_PKT_SKD':     dict(datasets=['cub200'], flags=f'{VIT} -LT -SKD'),
@@ -518,7 +519,7 @@ PAPER = {
     'Table 1': {('PriViLege', 'cub200'):        [(82.21, .35), (75.08, .52), (77.50, .33)],
                 ('PriViLege', 'cifar100'):      [(90.88, .20), (86.06, .32), (88.08, .20)],
                 ('PriViLege', 'mini_imagenet'): [(96.68, .06), (94.10, .13), (95.27, .11)]},
-    'Table 3': {('abl_Baseline', 'cub200'): [(84.21, .13), (3.79, 1.47), (21.60, 1.32)],
+    'Table 3': {('abl_FT', 'cub200'):       [(84.21, .13), (3.79, 1.47), (21.60, 1.32)],
                 ('abl_PKT', 'cub200'):      [(79.06, .77), (70.81, .76), (73.36, .77)],
                 ('abl_PKT_ED', 'cub200'):   [(80.31, .54), (72.70, .45), (75.04, .40)],
                 ('abl_PKT_SKD', 'cub200'):  [(82.10, .57), (73.44, .40), (76.27, .30)],
@@ -538,7 +539,7 @@ FIG3 = {   # Figure 3, accuracy per session (Base, 1..8)
 }
 PAPER['Figure 3'] = {(n, 'cifar100'): [(v[0], None), (v[-1], None), (round(float(np.mean(v)), 2), None)]
                      for n, v in FIG3.items()}
-LABELS = {'PriViLege': 'PriViLege (Ours)', 'abl_Baseline': 'Baseline (fine-tune + proto)', 'abl_PKT': 'PKT',
+LABELS = {'PriViLege': 'PriViLege (Ours)', 'abl_FT': 'Baseline (fine-tune + proto)', 'abl_PKT': 'PKT',
           'abl_PKT_ED': 'PKT + L_ED', 'abl_PKT_SKD': 'PKT + L_SKD', 'layers_0': '0 layers', 'layers_5': '5 layers',
           'layers_7': '7 layers', 'layers_10': '10 layers', 'layers_12': '12 layers',
           'clip_zeroshot': 'CLIP zero-shot', 'clip_PKT': 'CLIP-PKT', 'clip_PKT_ED': 'CLIP-PKT + L_ED',
@@ -652,12 +653,15 @@ code("run_all('PriViLege', ['mini_imagenet'])\nshow('Table 1')")
 
 md(r'''
 ## 6. Table 3: ablation on CUB200 (5 seeds each)
-- **Baseline**: fine-tuning the pre-trained ViT with the prototype classifier ψ. This uses the released `-ft` option (ViT blocks 0–1
-  trained in the base session, every parameter trained in the incremental sessions). The authors' compiled "Baseline" file
-  is an unfinished experiment that does not match the paper's description, so it is not used.
+- **Baseline** (`abl_FT`): fine-tuning the pre-trained ViT with the prototype classifier ψ: `-ft -plain_ft`. No prompts;
+  ViT blocks 0–1 and the classifier are trained in the base session, every parameter in the incremental sessions; the
+  prototypes and the test images use the same ViT CLS feature. The released `-ft` alone (the earlier `abl_Baseline` runs,
+  no longer shown) kept the classifier frozen and ran the images through prompts left at random values, and the
+  prototypes came from a different feature than the test images. The authors' compiled "Baseline" file is an
+  unfinished experiment that does not match the paper's description, so it is not used.
 - **PKT**, **PKT + L_ED**, **PKT + L_SKD**: the method without one or both losses. **Ours** reuses the Table 1 CUB200 runs.
 ''')
-code("for name in ['abl_Baseline', 'abl_PKT', 'abl_PKT_ED', 'abl_PKT_SKD']:\n    run_all(name)\nshow('Table 3')")
+code("for name in ['abl_FT', 'abl_PKT', 'abl_PKT_ED', 'abl_PKT_SKD']:\n    run_all(name)\nshow('Table 3')")
 
 md(r'''
 ## 7. Table 4: number of tuned layers (CUB200, 5 seeds each)

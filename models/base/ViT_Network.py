@@ -83,6 +83,14 @@ class ViT_MYNET(nn.Module):
         return x
     
     def prompt_encode(self, img, prompt_feat=False, B_tuning=False, eval=False):
+        if getattr(self.args, 'plain_ft', False):
+            # Plain fine-tuning baseline: no prompts. Training, testing and the incremental sessions use the ViT CLS
+            # feature, the same feature encode() gives the prototype classifier (replace_base_fc, update_fc_avg).
+            # Callers average cls and 'Vision', so the logits are fc(cls).
+            cls_embed = self._plain_cls(img)
+            if prompt_feat:
+                return cls_embed, {'Vision': cls_embed, 'Language': cls_embed}
+            return cls_embed
         x = self.encoder.patch_embed(img)
         ex_cls = self.encoder.cls_token.expand(x.shape[0], -1, -1)
         x = torch.cat([ex_cls,x],dim=1)
@@ -111,6 +119,19 @@ class ViT_MYNET(nn.Module):
         else:
             return cls_embed
     
+    def _plain_cls(self, img):
+        # The same computation as encode() (timm forward_features, CLS token), written out so that -grad_ckpt can
+        # recompute the blocks with use_reentrant=False. timm's own checkpointing is reentrant and, with a frozen patch
+        # embedding, would silently give the tuned blocks no gradient.
+        enc = self.encoder
+        x = enc.patch_embed(img)
+        x = torch.cat([enc.cls_token.expand(x.shape[0], -1, -1), x], dim=1)
+        x = enc.norm_pre(enc.pos_drop(x + enc.pos_embed))
+        ckpt = getattr(self.args, 'grad_ckpt', False) and self.training and torch.is_grad_enabled()
+        for block in enc.blocks:
+            x = checkpoint(block, x, use_reentrant=False) if ckpt else block(x)
+        return enc.norm(x)[:, 0]
+
     def _forward_blocks(self, x, prefix_tkn, eval=False):
         taskblock=[0,1]
         if len(taskblock) == len(self.encoder.blocks) or  0 in taskblock:

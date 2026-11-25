@@ -70,11 +70,14 @@ class ViT_FSCILTrainer(Trainer):
             for p in self.model.parameters():
                 p.requires_grad=False
                 
-            num_layer = [l for l in range(args.taskblock)] 
+            num_layer = [l for l in range(args.taskblock)]
             for idx, block in enumerate(self.model.encoder.blocks):
                 if idx in num_layer:
                     for p in block.parameters():
                         p.requires_grad=True
+            if self.args.plain_ft:   # plain fine-tuning: the classifier is trained with the tuned blocks
+                for p in self.model.fc.parameters():
+                    p.requires_grad=True
         elif self.args.lp:
             pass
         else:
