@@ -187,13 +187,16 @@ def base_train(model, trainloader, optimizer, scheduler, epoch, word_info, query
         optimizer.zero_grad()
         total_loss.backward()
         
-        grad={}
-        grad['expert_prompt']=model.module.expert_prompt.grad.clone().detach().cpu()
-        grad['prompt']=model.module.prompt.grad.clone().detach().cpu()
-        for n, p in model.module.encoder.blocks[:2].named_parameters():
-            if 'attn.qkv.weight' in n:
-                grad[n] = torch.norm(p.clone().detach().cpu(),p=2,dim=1).mean()
-        loss_curve['grad_list'].append(grad)
+        # Gradient diagnostics (never read). Only for the ViT model with trainable prompts: the CLIP model
+        # keeps its prompts in encoder.*, and with -ft the prompts are frozen (grad is None).
+        if not args.pret_clip and model.module.expert_prompt.grad is not None:
+            grad={}
+            grad['expert_prompt']=model.module.expert_prompt.grad.clone().detach().cpu()
+            grad['prompt']=model.module.prompt.grad.clone().detach().cpu()
+            for n, p in model.module.encoder.blocks[:2].named_parameters():
+                if 'attn.qkv.weight' in n:
+                    grad[n] = torch.norm(p.clone().detach().cpu(),p=2,dim=1).mean()
+            loss_curve['grad_list'].append(grad)
         
         optimizer.step()
         

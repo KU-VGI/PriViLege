@@ -99,7 +99,7 @@ class MiniImageNet(Dataset):
 
     def mapping_clsidx_to_txt(self):
         classes = {}
-        lines = [x.strip() for x in open('/data/pgh2874/FSCIL/Ours/dataloader/miniimagenet/map_clsloc.txt', 'r').readlines()][1:]
+        lines = [x.strip() for x in open(osp.join(osp.dirname(__file__), 'map_clsloc.txt'), 'r').readlines()][1:]
         for l in lines:
             name, class_num, class_txt = l.split(' ')
             if name not in classes.keys():
