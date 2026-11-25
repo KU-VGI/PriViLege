@@ -1,66 +1,264 @@
 # Builds colab/PriViLege_colab.ipynb (run with any Python 3).
-import json, sys
+#
+#   python colab/make_notebook.py colab/PriViLege_colab.ipynb          (write the notebook)
+#   python colab/make_notebook.py colab/PriViLege_colab.ipynb --run    (also run Part A, the results, and keep its outputs)
+import json, os, sys
 
 cells = []
-def md(s): cells.append({'cell_type': 'markdown', 'metadata': {}, 'source': s.strip('\n')})
-def code(s): cells.append({'cell_type': 'code', 'metadata': {}, 'execution_count': None, 'outputs': [], 'source': s.strip('\n')})
+def md(s, part=None):
+    cells.append({'cell_type': 'markdown', 'metadata': {}, 'source': s.strip('\n')})
+def code(s, part=None):
+    cells.append({'cell_type': 'code', 'metadata': {'part': part} if part else {}, 'execution_count': None,
+                  'outputs': [], 'source': s.strip('\n')})
+
+# =====================================================================================================================
+md(r'''
+# PriViLege (CVPR 2024): reproduction
+
+Our reproduction of **Table 1** (CUB200, CIFAR-100, miniImageNet), **Tables 3 and 4** (ablations on CUB200) and
+**Figure 3** (PriViLege on CLIP, CIFAR-100) with the authors' code: branch `t4-fixes` of `AkilaDissanayake/PriViLege`,
+their code plus the fixes needed on today's PyTorch and 16 GB GPUs.
+
+- **Part A: Results** (any machine, no GPU, a few seconds). Every finished run is in one file, `results/all_runs.csv`
+  (5 seeds per experiment, 1 for CLIP zero-shot). Part A reads it and shows each table and plot next to the paper's.
+- **Part B: Training** (GPU: Colab or RunPod). Sets up data and code and runs experiments. Every planned run is already
+  in `results/all_runs.csv`, so Part B skips them: it is only needed to repeat a run or add new ones.
+
+**Metrics.** A_Base = accuracy after the base session, A_Last = after the last session, A_Avg = mean over all sessions.
+Ours are mean ± standard deviation over the seeds; Δ = ours − paper (green within 1 point, orange within 3, red beyond).
+''')
+
+# =====================================================================================================================
+md(r'''
+# Part A: Results
+## A1. Load the results
+Reads `results/all_runs.csv` from the repo (or from GitHub when the notebook is opened on its own). After new runs in
+Part B, run this cell again: their rows are added, and a repeated run replaces the earlier one.
+''')
+code(r'''
+import csv, glob, json, os, urllib.request
+import numpy as np, pandas as pd, matplotlib.pyplot as plt
+from IPython.display import display, Markdown
+
+RESULTS_URL = 'https://raw.githubusercontent.com/AkilaDissanayake/PriViLege/t4-fixes/results/all_runs.csv'
+
+def results_files():
+    # results/all_runs.csv, then the results files of runs made with Part B (their rows win: newer)
+    repo = globals().get('REPO')
+    local = [p for p in ([f'{repo}/results/all_runs.csv'] if repo else []) + ['../results/all_runs.csv', 'results/all_runs.csv']
+             if os.path.exists(p)]
+    base = local[0] if local else urllib.request.urlretrieve(RESULTS_URL, 'all_runs.csv')[0]
+    return [base] + (sorted(glob.glob(f"{globals()['RUNS']}/results/runs*.csv")) if 'RUNS' in globals() else [])
+
+def load_runs():
+    rows = {}
+    for path in results_files():
+        with open(path, newline='', encoding='utf-8') as f:
+            for r in csv.DictReader(f):
+                if r['name'] in EXPERIMENTS:   # skips the smoke test and anything not in the paper's tables
+                    rows[(r['name'], r['dataset'], int(r['seed']))] = r
+    df = pd.DataFrame(list(rows.values()))
+    df['seed'] = df['seed'].astype(int)
+    for c in ['A_Base', 'A_Last', 'A_Avg', 'minutes']:
+        df[c] = df[c].astype(float)
+    df['sessions'] = df['sessions'].map(json.loads)
+    order = {n: i for i, n in enumerate(EXPERIMENTS)}
+    return df.sort_values(['name', 'dataset', 'seed'], key=lambda s: s.map(order) if s.name == 'name' else s,
+                          ignore_index=True)
+
+# Experiments in the paper's tables, in table order, with their row labels
+EXPERIMENTS = {'PriViLege': 'PriViLege (Ours)', 'abl_FT': 'Baseline (fine-tune + proto)', 'abl_PKT': 'PKT',
+               'abl_PKT_ED': 'PKT + L_ED', 'abl_PKT_SKD': 'PKT + L_SKD',
+               'layers_0': '0 layers', 'layers_5': '5 layers', 'layers_7': '7 layers', 'layers_10': '10 layers',
+               'layers_12': '12 layers', 'clip_zeroshot': 'CLIP zero-shot', 'clip_PKT': 'CLIP-PKT',
+               'clip_PKT_ED': 'CLIP-PKT + L_ED', 'clip_PKT_ED_SKD': 'CLIP-PKT + L_ED + L_SKD'}
+DS = {'cub200': 'CUB200', 'cifar100': 'CIFAR-100', 'mini_imagenet': 'miniImageNet'}
+METRICS = ['A_Base', 'A_Last', 'A_Avg']
+
+runs = load_runs()
+print(f'{len(runs)} runs from', ', '.join(results_files()))
+''', part='A')
 
 md(r'''
-# PriViLege (CVPR 2024): reproduction on Colab or RunPod
+## A2. Paper numbers and helpers
+Paper values are (mean, std) of A_Base, A_Last and A_Avg. Figure 3 has no table: its values were read off the plot
+(accuracy per session, within about ± 0.3), so it has no std.
+''')
+code(r'''
+PAPER = {
+    'Table 1': {('PriViLege', 'cifar100'):      [(90.88, .20), (86.06, .32), (88.08, .20)],
+                ('PriViLege', 'cub200'):        [(82.21, .35), (75.08, .52), (77.50, .33)],
+                ('PriViLege', 'mini_imagenet'): [(96.68, .06), (94.10, .13), (95.27, .11)]},
+    'Table 3': {('abl_FT', 'cub200'):      [(84.21, .13), (3.79, 1.47), (21.60, 1.32)],
+                ('abl_PKT', 'cub200'):     [(79.06, .77), (70.81, .76), (73.36, .77)],
+                ('abl_PKT_ED', 'cub200'):  [(80.31, .54), (72.70, .45), (75.04, .40)],
+                ('abl_PKT_SKD', 'cub200'): [(82.10, .57), (73.44, .40), (76.27, .30)],
+                ('PriViLege', 'cub200'):   [(82.21, .35), (75.08, .52), (77.50, .33)]},
+    'Table 4': {('layers_0', 'cub200'):  [(76.07, .56), (60.19, 1.11), (67.08, .71)],
+                ('abl_PKT', 'cub200'):   [(79.06, .77), (70.81, .76), (73.36, .77)],
+                ('layers_5', 'cub200'):  [(78.42, .84), (68.52, .84), (71.99, .84)],
+                ('layers_7', 'cub200'):  [(76.96, .74), (63.15, 2.73), (68.06, 1.54)],
+                ('layers_10', 'cub200'): [(74.95, .78), (57.78, 2.30), (64.19, 1.59)],
+                ('layers_12', 'cub200'): [(73.62, 2.72), (56.02, 1.47), (62.71, 2.14)]},
+}
+FIG3 = {   # Figure 3, accuracy per session (base, 1..8), read off the plot
+    'clip_zeroshot':   [78.8, 76.6, 75.2, 73.1, 72.5, 72.4, 72.7, 72.3, 71.0],
+    'clip_PKT':        [82.3, 79.5, 77.6, 75.4, 74.0, 73.2, 73.3, 72.6, 71.4],
+    'clip_PKT_ED':     [83.7, 81.2, 79.8, 77.6, 76.7, 76.3, 76.5, 76.2, 74.7],
+    'clip_PKT_ED_SKD': [84.2, 82.1, 81.0, 79.0, 78.8, 78.4, 78.6, 78.3, 77.1],
+}
+PAPER['Figure 3'] = {(n, 'cifar100'): [(v[0], None), (v[-1], None), (round(float(np.mean(v)), 2), None)]
+                     for n, v in FIG3.items()}
 
-Runs the authors' code (branch `t4-fixes` of `AkilaDissanayake/PriViLege`: their code plus the fixes needed on today's
-PyTorch and on a 16 GB T4) for the paper's results: **Table 1** (CUB200, CIFAR-100, miniImageNet), **Tables 3 and 4**
-(ablations on CUB200) and **Figure 3** (PriViLege on CLIP, CIFAR-100). Every experiment cell ends with our numbers next to
-the paper's.
+def of(name, ds):
+    return runs[(runs['name'] == name) & (runs['dataset'] == ds)]
 
-**Fresh start.** Every log, result and resume state of this reproduction lives in `PriViLege/runs_v2/` in the shared Drive
-folder. Older runs (made before the L_ED NaN fix) stay untouched in `PriViLege/logs`, `results` and `resume` and are never
-read, so every experiment here starts from the beginning. Datasets in `PriViLege/datasets/` are shared and reused.
+def ms(x):
+    return f'{np.mean(x):.2f} ± {np.std(x, ddof=1) if len(x) > 1 else 0:.2f}'
+
+def label(table, name, ds):
+    if table == 'Table 1':
+        return DS[ds]
+    if table == 'Table 4' and name == 'abl_PKT':
+        return '2 layers (= PKT)'
+    return EXPERIMENTS[name]
+
+def color(v):
+    if pd.isna(v):
+        return ''
+    return 'color: green' if abs(v) <= 1 else ('color: orange' if abs(v) <= 3 else 'color: red')
+
+def compare(table):
+    rows = []
+    for (name, ds), paper in PAPER[table].items():
+        r = of(name, ds)
+        row = {'': label(table, name, ds), 'seeds': len(r)}
+        for m, (pm, ps) in zip(METRICS, paper):
+            row[f'{m} ours'] = ms(r[m]) if len(r) else '—'
+            row[f'{m} paper'] = f'{pm:.2f}' + (f' ± {ps:.2f}' if ps is not None else ' (fig.)')
+            row[f'Δ {m}'] = round(r[m].mean() - pm, 2) if len(r) else np.nan
+        rows.append(row)
+    df = pd.DataFrame(rows).set_index('')
+    display(Markdown(f'**{table}: ours vs. paper**'))
+    display(df.style.map(color, subset=[f'Δ {m}' for m in METRICS]).format(precision=2, na_rep='—'))
+
+def plot_sessions(table):
+    curves = FIG3 if table == 'Figure 3' else {}
+    plt.figure(figsize=(7, 4))
+    for i, (name, ds) in enumerate(PAPER[table]):
+        r, c, lab = of(name, ds), f'C{i}', label(table, name, ds)
+        if len(r):
+            acc = np.array(r['sessions'].tolist())
+            x = np.arange(acc.shape[1])
+            plt.plot(x, acc.mean(0), '-o', color=c, ms=4, label=f'{lab} (ours, n={len(r)})')
+            if len(r) > 1:
+                sd = acc.std(0, ddof=1)
+                plt.fill_between(x, acc.mean(0) - sd, acc.mean(0) + sd, color=c, alpha=.15)
+        if name in curves:
+            plt.plot(curves[name], '--*', color=c, alpha=.7, label=f'{lab} (paper)')
+    plt.xlabel('session (0 = base)'); plt.ylabel('accuracy (%)'); plt.title(f'{table}: accuracy per session')
+    plt.grid(alpha=.3); plt.legend(fontsize=8); plt.tight_layout(); plt.show()
+
+def show(table):
+    compare(table)
+    plot_sessions(table)
+''', part='A')
+
+md(r'''
+## A3. What is in the file
+Seeds and GPU time per experiment (NVIDIA A40). A run that was interrupted and resumed only records the time of its
+last part.
+''')
+code(r'''
+summary = (runs.groupby(['name', 'dataset'], sort=False)
+               .agg(seeds=('seed', lambda s: ', '.join(map(str, sorted(s)))),
+                    minutes_per_run=('minutes', 'median'), resumed=('resumed', lambda s: (s == 'yes').sum()))
+               .rename(index=EXPERIMENTS, level=0).rename(index=DS, level=1))
+display(summary)
+print(f"{len(runs)} runs | about {runs['minutes'].sum() / 60:.1f} GPU hours recorded")
+''', part='A')
+
+md(r'''
+## A4. Table 1: PriViLege on the three benchmarks
+CUB200: 100 base classes + 10 sessions of 10-way 5-shot. CIFAR-100 and miniImageNet: 60 base classes + 8 sessions of
+5-way 5-shot.
+''')
+code("show('Table 1')", part='A')
+
+md(r'''
+## A5. Table 3: ablation on CUB200
+- **Baseline**: fine-tuning the pre-trained ViT with the prototype classifier, no prompts (`-ft -plain_ft`): ViT blocks
+  0–1 and the classifier are trained in the base session, every parameter in the incremental sessions, and the
+  prototypes and the test images use the same ViT CLS feature.
+- **PKT**, **PKT + L_ED**, **PKT + L_SKD**: the method without one or both losses. **Ours** is the Table 1 CUB200 run.
+''')
+code("show('Table 3')", part='A')
+
+md(r'''
+## A6. Table 4: number of tuned layers (CUB200)
+Without the two losses, as in the paper; the 2-layer row is the PKT row of Table 3.
+''')
+code("show('Table 4')", part='A')
+
+md(r'''
+## A7. Figure 3: PriViLege on CLIP (CIFAR-100)
+CLIP ViT-B/16 (LAION-2B). Dashed lines: the paper's curves, read off Figure 3.
+''')
+code("show('Figure 3')", part='A')
+
+md('## A8. Every comparison in one table')
+code(r'''
+allrows = []
+for t in ['Table 1', 'Table 3', 'Table 4', 'Figure 3']:
+    for (name, ds), paper in PAPER[t].items():
+        r = of(name, ds)
+        row = {'table': t, 'row': label(t, name, ds), 'seeds': len(r)}
+        for m, (pm, ps) in zip(METRICS, paper):
+            row[m] = round(r[m].mean(), 2) if len(r) else np.nan
+            row[f'Δ {m}'] = round(r[m].mean() - pm, 2) if len(r) else np.nan
+        allrows.append(row)
+alldf = pd.DataFrame(allrows).set_index(['table', 'row'])
+display(alldf.style.map(color, subset=[f'Δ {m}' for m in METRICS]).format(precision=2, na_rep='—'))
+''', part='A')
+
+md('## A9. Every run, seed by seed')
+code(r'''
+cols = ['name', 'dataset', 'seed', 'A_Base', 'A_Last', 'A_Avg', 'minutes', 'resumed', 'commit', 'flags']
+display(runs[cols].style.hide(axis='index').format(precision=2))
+''', part='A')
+
+# =====================================================================================================================
+md(r'''
+# Part B: Training
+Only needed to repeat a run or add new ones: every planned run is in `results/all_runs.csv` and is skipped.
 
 ### Once only
 1. **Drive.** The folder owner shares https://drive.google.com/drive/folders/1UuLlbEoUMMv8ShyRU-x117Ir3ePqYPeq with your
-   Google account as **Editor**. Signed in as that account, open the link, right-click the folder → **Organize → Add
-   shortcut → My Drive** (Colab can only see a shared folder through a shortcut).
-2. **RunPod only.** On your PC (PowerShell): `winget install Rclone.Rclone`, open a new terminal, run
-   `rclone authorize "drive"`, sign in with that same account and copy the token it prints (one line, `{...}`).
+   Google account as **Editor**. Colab: signed in as that account, open the link, right-click the folder →
+   **Organize → Add shortcut → My Drive**.
+2. **RunPod only.** On your PC: install rclone (`winget install Rclone.Rclone`), run `rclone authorize "drive"`, sign in
+   with that same account and copy the token it prints (one line, `{...}`). B1b asks for it once per pod.
 
-### Every session (Colab or RunPod)
-Run **1a → 1a-2 → 1b → 1c → 1d → 1e**, then the two cells of section 2, then **3. Status**.
-- Colab: Runtime → Change runtime type → **T4 GPU** (or better). If 1c stops at the timm check: Runtime → **Restart
-  session**, then run 1a–1c again.
-- RunPod: a PyTorch template and a **100 GB volume** on `/workspace`. GPU: RTX 4090 or 5090 (24/32 GB: no `-grad_ckpt`).
-  For speed take **several of them in one pod** (e.g. 8 x RTX 4090) and use section 4c: the code runs in fp32, where an
-  H100/A100 is no faster than a 4090.
-  In a JupyterLab terminal: `cd /workspace && wget https://raw.githubusercontent.com/AkilaDissanayake/PriViLege/t4-fixes/colab/PriViLege_colab.ipynb`,
-  open it, and paste the rclone token when 1a-2 asks (once per volume).
+### Every session
+- **Colab:** Runtime → Change runtime type → **T4 GPU** or better.
+- **RunPod:** a PyTorch template on an A40, RTX 4090 or better (the code runs in fp32, where an H100 is no faster), with
+  **150 GB container disk**. No network volume is needed: everything is kept in the shared Drive folder. In a
+  JupyterLab terminal:
+  `wget https://raw.githubusercontent.com/AkilaDissanayake/PriViLege/t4-fixes/colab/PriViLege_colab.ipynb` and open it.
 
-### Order of the experiments
-1. **4. Smoke test** (T4 ~15 min). Must end with `== smoke | cifar100 | seed 1: A_Base …`.
-2. **4b. Quick checks** (T4 ~45 min): one real CUB200 run and CLIP zero-shot, printed next to the paper's numbers.
-   If both are close, the code is confirmed: move to RunPod for the rest.
-3. **5. Table 1** CUB200 first, then **6. Table 3** and **7. Table 4** (all CUB200, cheap), then Table 1 CIFAR-100 and
-   miniImageNet (about 2 h per run on a T4), then **8. Figure 3** (CLIP; run one `clip_PKT_ED_SKD` seed first), then **9**.
+Run **B1a → B1f**, then **B2** and **B3**. Every finished run is copied to the shared Drive folder (`runs_v2/`) at once,
+and on RunPod the checkpoints of running jobs every 10 minutes: after any stop, a new session continues each run from
+its last checkpoint. Training stops on its own at the first NaN loss (a `FloatingPointError`).
 
-### If anything stops
-Re-run the setup cells and the same experiment cell: finished runs are skipped, an interrupted run resumes from its last
-saved epoch or session. Training stops on its own at the first NaN loss (a `FloatingPointError`): send the last 30 lines of
-the output. On RunPod every finished run is copied to the shared Drive folder (`runs_v2/`) at once, and the checkpoints of
-running jobs every 10 minutes (`runs_v2/resume/`). A new pod's setup cell downloads them, so even after terminating a pod
-the next one (or Colab) continues each unfinished run from its last uploaded checkpoint.
-''')
-
-md(r'''
-## 1. Setup
+## B1. Setup
 ''')
 
 code(r'''
-# 1a. Where datasets, logs and results live.
-# Colab: the shared Drive folder, mounted. RunPod / other machines: a folder on the persistent volume, synced with the
-# same shared Drive folder by rclone (cell 1a-2).
-# The shared project folder: https://drive.google.com/drive/folders/1UuLlbEoUMMv8ShyRU-x117Ir3ePqYPeq
+# B1a. Where datasets, logs and results live. Colab: the shared Drive folder, mounted. RunPod: a local folder kept in
+# step with the same Drive folder by rclone (B1b).
 DRIVE_FOLDER_ID = '1UuLlbEoUMMv8ShyRU-x117Ir3ePqYPeq'
 DRIVE_FOLDER    = 'PriViLege'   # fallback: a folder with this name directly in My Drive (e.g. for the owner)
-import os, glob, uuid
+import os, glob, socket, uuid
 try:
     import google.colab
     ON_COLAB = True
@@ -75,48 +273,51 @@ def find_drive_folder():
     own = f'/content/drive/MyDrive/{DRIVE_FOLDER}'
     return own if os.path.isdir(own) else None
 
+def usable(folder):
+    # RunPod network volumes refuse chmod, which rclone's install and git need: use the container disk instead
+    try:
+        os.makedirs(folder, exist_ok=True)
+        probe = f'{folder}/.probe_{uuid.uuid4().hex[:8]}'
+        open(probe, 'w').close(); os.chmod(probe, 0o755); os.remove(probe)
+        return True
+    except OSError:
+        return False
+
 if ON_COLAB:
     from google.colab import drive
     drive.mount('/content/drive')
-    DATA  = '/content/data'
-    REPO  = '/content/PriViLege'
-    DRIVE = find_drive_folder()
+    DATA, REPO, DRIVE = '/content/data', '/content/PriViLege', find_drive_folder()
+    MACHINE = 'colab'
 else:
-    BASE  = '/workspace' if os.path.isdir('/workspace') else os.path.expanduser('~')   # RunPod's persistent volume
-    DATA  = f'{BASE}/data'
-    REPO  = f'{BASE}/PriViLege'
-    DRIVE = f'{BASE}/privilege_drive'   # local copy of the shared Drive folder
+    BASE = '/workspace' if usable('/workspace') else os.path.expanduser('~/work')
+    DATA, REPO, DRIVE = f'{BASE}/data', f'{BASE}/PriViLege', f'{BASE}/privilege_drive'
+    MACHINE = 'runpod_' + os.environ.get('RUNPOD_POD_ID', socket.gethostname())   # each pod writes its own results file
     os.makedirs(DRIVE, exist_ok=True)
-# Stop here instead of quietly creating an empty folder in the wrong Drive and downloading everything again.
 if DRIVE is None:
     raise FileNotFoundError('The shared Drive folder is not visible to this account. Open '
                             f'https://drive.google.com/drive/folders/{DRIVE_FOLDER_ID} while signed in as the account '
-                            'you mounted, right-click the folder -> Organize -> Add shortcut -> My Drive, then run this cell '
-                            'again. If the link says you need access, ask the owner to share it with you as Editor.')
+                            'you mounted, right-click the folder -> Organize -> Add shortcut -> My Drive, then run this '
+                            'cell again. If the link says you need access, ask the owner to share it with you as Editor.')
 probe = f'{DRIVE}/.write_test_{uuid.uuid4().hex[:8]}'
 try:
     open(probe, 'w').close(); os.remove(probe)
 except OSError as e:
-    raise PermissionError(f'{DRIVE} is read-only for this account: ask the folder owner to share it with you as Editor.') from e
-# Every log, result and resume state of this reproduction goes to RUNS. Runs made before the NaN fix are in DRIVE/logs,
-# DRIVE/results and DRIVE/resume and are never read, so nothing is resumed or skipped because of them.
-RUN_SET = 'runs_v2'
+    raise PermissionError(f'{DRIVE} is read-only for this account: ask the folder owner to share it as Editor.') from e
+RUN_SET = 'runs_v2'                 # logs/, results/ and resume/ of this reproduction in the shared Drive folder
 RUNS = f'{DRIVE}/{RUN_SET}'
-os.makedirs(f'{DRIVE}/datasets', exist_ok=True)
-for d in ['logs', 'results', 'resume']:
-    os.makedirs(f'{RUNS}/{d}', exist_ok=True)
-os.makedirs(DATA, exist_ok=True)
-print('Running on', 'Colab' if ON_COLAB else 'RunPod / local Jupyter', '| folder:', DRIVE, '| contents:', sorted(os.listdir(DRIVE)))
+for d in [f'{DRIVE}/datasets', f'{RUNS}/logs', f'{RUNS}/results', f'{RUNS}/resume', DATA]:
+    os.makedirs(d, exist_ok=True)
+print('Running on', MACHINE, '| data and runs in', DRIVE)
 !nvidia-smi --query-gpu=name,memory.total --format=csv
 ''')
 
 code(r'''
-# 1a-2. RunPod only (does nothing on Colab): link to the shared Drive folder with rclone, then copy its datasets/, logs/
-# and results/ to the pod. drive_push() copies logs/ and results/ back after every run.
+# B1b. RunPod only (does nothing on Colab): link to the shared Drive folder with rclone and copy its datasets/ and
+# runs_v2/ to the pod. drive_push() copies logs and results back after every run.
 import subprocess, shutil
 
 def drive_push(resume=False):
-    pass   # Colab writes straight into the mounted Drive folder (logs, results and resume states)
+    pass   # Colab writes straight into the mounted Drive folder
 
 def drive_drop_resume(name, dataset, seed):
     pass
@@ -124,20 +325,15 @@ def drive_drop_resume(name, dataset, seed):
 if not ON_COLAB:
     import zipfile, getpass
     RCLONE      = f'{BASE}/bin/rclone'
-    RCLONE_CONF = f'{BASE}/rclone.conf'   # on the volume: survives pod restarts. Contains your Drive token: do not share it.
-    if not os.path.exists(RCLONE):        # install rclone on the volume once
+    RCLONE_CONF = f'{BASE}/rclone.conf'   # contains your Drive token: do not share it
+    if not os.path.exists(RCLONE):
         os.makedirs(f'{BASE}/bin', exist_ok=True)
         zpath = f'{BASE}/bin/rclone.zip'
         url = 'https://downloads.rclone.org/v1.68.2/rclone-v1.68.2-linux-amd64.zip'
-        # curl, as in rclone's own install script (the server refuses Python's urllib with 403 Forbidden); wget if no curl
-        ok = False
-        for cmd in (['curl', '-fsSL', '-o', zpath, url], ['wget', '-q', '-O', zpath, url]):
-            if shutil.which(cmd[0]) and subprocess.run(cmd).returncode == 0:
-                ok = True
-                break
-        if not ok or not os.path.exists(zpath):
-            raise RuntimeError(f'Could not download rclone from {url}. Install it by hand into {RCLONE} (see the header), '
-                               'then run this cell again.')
+        # curl, as in rclone's own install script (the server refuses Python's urllib); wget if there is no curl
+        if not any(shutil.which(c[0]) and subprocess.run(c).returncode == 0
+                   for c in (['curl', '-fsSL', '-o', zpath, url], ['wget', '-q', '-O', zpath, url])):
+            raise RuntimeError(f'Could not download rclone from {url}: install it by hand into {RCLONE}.')
         with zipfile.ZipFile(zpath) as z:
             member = next(n for n in z.namelist() if n.endswith('/rclone'))
             with z.open(member) as src, open(RCLONE, 'wb') as dst:
@@ -155,40 +351,35 @@ if not ON_COLAB:
             raise RuntimeError('rclone config failed: ' + r.stderr[-500:])
     r = rclone('lsf', 'gdrive:', '--max-depth', '1')
     if r.returncode != 0:
-        raise RuntimeError('Cannot read the shared Drive folder with rclone. Check that the account you signed in with has '
-                           f'Editor access, or delete {RCLONE_CONF} and run this cell again. ' + r.stderr[-500:])
-    print('Shared Drive folder contents:', r.stdout.split())
-    # resume/: checkpoints of unfinished runs (from Colab or an earlier pod), so this pod continues them
-    SYNC = ['datasets', f'{RUN_SET}/logs', f'{RUN_SET}/results', f'{RUN_SET}/resume']
-    for d in SYNC:   # --update: never replace a newer file on the pod with an older one
+        raise RuntimeError('Cannot read the shared Drive folder with rclone. Check that the account has Editor access, '
+                           f'or delete {RCLONE_CONF} and run this cell again. ' + r.stderr[-500:])
+    # resume/: checkpoints of unfinished runs from an earlier pod or Colab, so this pod continues them
+    for d in ['datasets', f'{RUN_SET}/logs', f'{RUN_SET}/results', f'{RUN_SET}/resume']:
         if rclone('lsf', f'gdrive:{d}', '--max-depth', '1').returncode != 0:
-            print(f'Drive {d}/: nothing there yet (it is created when the first run finishes)')
-            continue
+            continue   # not created yet
         print(f'Copying Drive {d}/ to the pod ...')
         get_ipython().system(f'{RCLONE} --config {RCLONE_CONF} copy gdrive:{d} "{DRIVE}/{d}" --update --stats-one-line -P')
 
     def drive_push(resume=False):
-        # logs and results after every run; resume=True: also the checkpoints of running jobs (every few minutes)
+        # logs and results after every run; resume=True: also the checkpoints of running jobs
         for d in [f'{RUN_SET}/logs', f'{RUN_SET}/results'] + ([f'{RUN_SET}/resume'] if resume else []):
-            # Logs of running jobs keep growing while they upload, so their checksum can never match: upload them
-            # as they are (the next push sends the rest). Results and checkpoints keep the checksum check.
+            # running jobs' logs grow during the upload, so their checksum cannot match: upload them as they are
             grow = ['--local-no-check-updated', '--ignore-checksum'] if d.endswith('/logs') else []
             r = rclone('copy', f'{DRIVE}/{d}', f'gdrive:{d}', '--update', '--exclude', '*.tmp', *grow)
             if r.returncode != 0:
-                print(f'!! Could not copy {d}/ to Drive (the files are safe on the pod volume):', r.stderr[-300:])
+                print(f'!! Could not copy {d}/ to Drive (the files are safe on the pod):', r.stderr[-300:])
 
     def drive_drop_resume(name, dataset, seed):
-        # a finished run's checkpoint is no longer needed in Drive
-        rclone('purge', f'gdrive:{RUN_SET}/resume/{name}/{dataset}/seed{seed}')
+        rclone('purge', f'gdrive:{RUN_SET}/resume/{name}/{dataset}/seed{seed}')   # a finished run's checkpoint
 ''')
 
 code(r'''
-# 1b. Code: the t4-fixes branch (colab-fixes + T4 memory and NaN fixes). The commit id is logged with every result.
+# B1c. Code: the t4-fixes branch. The commit id is recorded with every result.
 BRANCH = 't4-fixes'
 if not os.path.exists(REPO):
-    !git clone -b {BRANCH} https://github.com/AkilaDissanayake/PriViLege.git {REPO}
+    !git clone -q -b {BRANCH} https://github.com/AkilaDissanayake/PriViLege.git {REPO}
 else:
-    !git -C {REPO} fetch -q origin && git -C {REPO} checkout -q {BRANCH} && git -C {REPO} pull -q
+    !git -C {REPO} fetch -q origin && git -C {REPO} checkout -q {BRANCH} && git -C {REPO} pull -q --ff-only || echo "!! git pull failed: run  git -C {REPO} status  in a terminal"
 %cd {REPO}
 COMMIT = !git rev-parse --short HEAD
 COMMIT = COMMIT[0]
@@ -196,36 +387,26 @@ COMMIT = COMMIT[0]
 ''')
 
 code(r'''
-# 1c. Packages. Not requirements.txt (a full Anaconda dump that breaks Colab).
-# timm 0.6.13 loads the same ViT-B/16 checkpoint as the authors' 0.6.12 (which fails to import on Python 3.12);
-# open_clip is only needed for the CLIP experiments (Figure 3).
-# transformers, pandas, scikit-learn, matplotlib and tqdm come with Colab but not with RunPod's PyTorch image
-# (pip leaves packages that are already installed as they are).
+# B1d. Packages (not requirements.txt, a full Anaconda dump that breaks Colab). timm 0.6.13 loads the same ViT-B/16
+# checkpoint as the authors' 0.6.12, which fails to import on Python 3.12. open_clip: CLIP experiments (Figure 3).
 !pip install -q timm==0.6.13 open_clip_torch gdown transformers pandas scikit-learn matplotlib tqdm
-import timm, torch, transformers, pandas, open_clip
+import timm, torch, transformers, open_clip
 print('timm', timm.__version__, '| torch', torch.__version__, '| transformers', transformers.__version__,
-      '| pandas', pandas.__version__, '| open_clip', open_clip.__version__)
-assert timm.__version__ == '0.6.13', 'Restart the session (Runtime -> Restart session / VS Code Restart) and run 1a-1c again'
-assert torch.cuda.is_available(), ('No GPU: this is a CPU runtime and every run would fail. Colab: Runtime -> Change runtime '
-                                   'type -> GPU. VS Code: Select Kernel -> Colab -> New Colab Server -> GPU. RunPod: '
-                                   'start a GPU pod.')
+      '| open_clip', open_clip.__version__)
+assert timm.__version__ == '0.6.13', 'Restart the session (Colab: Runtime -> Restart session) and run B1a-B1d again'
+assert torch.cuda.is_available(), 'No GPU: Colab: Runtime -> Change runtime type -> GPU. RunPod: start a GPU pod.'
 GPU = torch.cuda.get_device_name(0)
 GPU_GB = torch.cuda.get_device_properties(0).total_memory / 2**30
-GRAD_CKPT = GPU_GB < 20   # T4 (16 GB): batch 128 only fits with gradient checkpointing (same results, slower).
-                          # 24 GB and up (RTX 3090/4090, L40S, A100): not needed.
+GRAD_CKPT = GPU_GB < 20   # 16 GB GPUs (T4): batch 128 only fits with gradient checkpointing (same results, slower)
 print(f'GPU: {GPU} ({GPU_GB:.0f} GB)' + (' -> -grad_ckpt on' if GRAD_CKPT else ''))
 ''')
 
 code(r'''
-# 1d. Datasets: copy one archive from Drive and extract it on the local disk (reading many small files from Drive is slow).
-import shutil
-
-# Google Drive file ids of the archives in the CEC folder used by FSCIL papers
+# B1e. Datasets: copy one archive from Drive and extract it on the local disk (many small files from Drive are slow).
+# Archives missing from Drive are downloaded from the CEC folder used by FSCIL papers:
 # https://drive.google.com/drive/folders/11LxZCQj2FRCs0JTsf_dafvTHqFn2yGSN
-GDRIVE_IDS = {
-    'cub200':        '1EtKb1Bxd9ZtK-WUFk5dIhoOdhLeohA1q',   # CUB_200_2011.tgz
-    'mini_imagenet': '1_x4o0iFetEv-T3PeIxdSbBPUG4hFfT8U',   # miniimagenet.tar
-}
+GDRIVE_IDS = {'cub200': '1EtKb1Bxd9ZtK-WUFk5dIhoOdhLeohA1q',          # CUB_200_2011.tgz
+              'mini_imagenet': '1_x4o0iFetEv-T3PeIxdSbBPUG4hFfT8U'}   # miniimagenet.tar
 ARCHIVES = {   # dataset -> (archive in Drive, folder after extraction)
     'cifar100':      ('cifar-100-python.tar.gz', 'cifar-100-python'),
     'cub200':        ('CUB_200_2011.tgz',        'CUB_200_2011'),
@@ -235,44 +416,40 @@ ARCHIVES = {   # dataset -> (archive in Drive, folder after extraction)
 def prepare(dataset):
     archive, folder = ARCHIVES[dataset]
     src = f'{DRIVE}/datasets/{archive}'
-    if os.path.isdir(f'{DATA}/{folder}'):
-        pass
-    elif os.path.exists(src):
-        print(f'Extracting {archive} ...')
-        get_ipython().system(f'tar -xf "{src}" -C {DATA} --no-same-owner')
-    elif dataset == 'cifar100':
-        print('CIFAR-100 is not in Drive yet; train.py downloads it (copied to Drive afterwards).')
-    else:
-        download_to_drive(dataset)
-        print(f'Extracting {archive} ...')
-        get_ipython().system(f'tar -xf "{src}" -C {DATA} --no-same-owner')
+    if not os.path.isdir(f'{DATA}/{folder}'):
+        if not os.path.exists(src):
+            if dataset == 'cifar100':
+                print('CIFAR-100 is not in Drive yet: train.py downloads it (copied to Drive afterwards).')
+            else:
+                download_to_drive(dataset)
+        if os.path.exists(src):
+            print(f'Extracting {archive} ...')
+            get_ipython().system(f'tar -xf "{src}" -C {DATA} --no-same-owner')
     if dataset == 'mini_imagenet':
-        # Always the repo's split files: the standard FSCIL split (100 classes x 500 train / 100 test) that the loader and
-        # the session lists expect, even if the archive ships a different split/ folder.
+        # the repo's split files: the standard FSCIL split the loader and the session lists expect
         os.makedirs(f'{DATA}/miniimagenet/split', exist_ok=True)
         get_ipython().system(f'cp {REPO}/data/index_list/mini_imagenet/*.csv {DATA}/miniimagenet/split/')
 
 def download_to_drive(dataset):
     import gdown
     archive = ARCHIVES[dataset][0]
-    tmp, dst = f'{DATA}/{archive}.download', f'{DRIVE}/datasets/{archive}'   # DATA exists on Colab and RunPod
-    print(f'{archive} is not in Drive: downloading it from the CEC Google Drive folder ...')
+    tmp, dst = f'{DATA}/{archive}.download', f'{DRIVE}/datasets/{archive}'
+    print(f'{archive} is not in Drive: downloading it from the CEC folder ...')
     gdown.download(id=GDRIVE_IDS[dataset], output=tmp, quiet=False)
     if not os.path.exists(tmp) or os.path.getsize(tmp) < 10_000_000:
         raise RuntimeError(f'Download of {archive} failed (Google Drive quota?). Try again later, or put it in '
                            f'{DRIVE}/datasets/ by hand from the CEC folder.')
     shutil.copy(tmp, dst + '.part'); os.replace(dst + '.part', dst); os.remove(tmp)
-    print(f'Saved {archive} to {dst} ({os.path.getsize(dst) / 1e9:.2f} GB)')
 
 def save_cifar_to_drive():
     src, dst = f'{DATA}/cifar-100-python.tar.gz', f'{DRIVE}/datasets/cifar-100-python.tar.gz'
     if os.path.exists(src) and not os.path.exists(dst):
-        shutil.copy(src, dst); print('Saved CIFAR-100 archive to Drive')
+        shutil.copy(src, dst)
 ''')
 
 code(r'''
-# 1e. Pretrained weights: ViT-B/16 (ImageNet-21k -> 1k AugReg, as the authors), BERT, and CLIP ViT-B/16 (LAION-2B).
-# Downloads them once, so a network problem shows up now instead of mid-run.
+# B1f. Pretrained weights, downloaded once so a network problem shows up now instead of mid-run: ViT-B/16
+# (ImageNet-21k -> 1k AugReg, as the authors), BERT, and CLIP ViT-B/16 (LAION-2B).
 m = timm.create_model('vit_base_patch16_224', pretrained=True)
 assert 'i21k' in m.default_cfg['url'], m.default_cfg['url']
 del m
@@ -283,34 +460,29 @@ print('ViT-B/16, bert-base-cased and CLIP ViT-B/16 (LAION-2B) ready')
 ''')
 
 md(r'''
-## 2. Experiments, runner and paper targets
-
-`run()` calls `train.py` with the official arguments (`run_script/vit_run_pretrain.py`) plus each experiment's flags.
-It skips runs already in `PriViLege/results/runs.csv` (in Drive), resumes interrupted runs, appends the log to Drive and records
-A_Base / A_Last / A_Avg and every session's accuracy. In the comparison tables Δ = ours − paper:
-green |Δ| ≤ 1, orange ≤ 3, red > 3.
+## B2. Experiments and runner
+`run()` calls `train.py` with the official arguments (`run_script/vit_run_pretrain.py`) plus each experiment's flags. A
+run is skipped when it is in `results/all_runs.csv` or in a results file of this reproduction (`runs_v2/results/`);
+an interrupted run resumes from its last saved epoch or session. Each finished run adds one row (A_Base, A_Last, A_Avg
+and every session's accuracy) to this machine's results file, `runs_v2/results/runs_<machine>.csv`.
 ''')
-
 code(r'''
-import ast, csv, glob, json, time, collections, threading, queue, subprocess
+import ast, csv, json, time, collections, threading, queue
 import numpy as np, pandas as pd
-import matplotlib.pyplot as plt
-from IPython.display import display, Markdown
+from IPython.display import display
 
-# One results file per kind of machine, so a RunPod sync never overwrites rows written from Colab (and vice versa)
-LOG_CSV = f'{RUNS}/results/runs.csv' if ON_COLAB else f'{RUNS}/results/runs_runpod.csv'
+LOG_CSV = f'{RUNS}/results/runs_{MACHINE}.csv'
 RESUME  = f'{RUNS}/resume'
 SEEDS   = [1, 2, 3, 4, 5]
 VIT     = '-vit -comp_out 1'
 
-# name -> datasets, train.py flags, epoch overrides.  Every experiment has its own name (= -out), because the
-# checkpoint path does not include the -ED / -SKD / -taskblock / -ft flags.
+# name -> datasets, train.py flags, epoch overrides. Every experiment has its own name (= -out), because the checkpoint
+# path does not include the -ED / -SKD / -taskblock / -ft flags.
 EXP = {
     'smoke':           dict(datasets=['cifar100'], flags=f'{VIT} -LT -ED -SKD', epochs_base=1, epochs_new=1),
     # Table 1 (and the 'Ours' row of Table 3)
     'PriViLege':       dict(datasets=['cifar100', 'cub200', 'mini_imagenet'], flags=f'{VIT} -LT -ED -SKD'),
-    # Table 3: Baseline = fine-tuning + prototype classifier, then the PKT ablations. -ft alone (the old 'abl_Baseline')
-    # kept the prompts at random values and the classifier frozen; -plain_ft uses no prompts and trains the classifier.
+    # Table 3: Baseline = fine-tuning + prototype classifier, no prompts; then the method without one or both losses
     'abl_FT':          dict(datasets=['cub200'], flags=f'{VIT} -ft -plain_ft'),
     'abl_PKT':         dict(datasets=['cub200'], flags=f'{VIT} -LT'),
     'abl_PKT_ED':      dict(datasets=['cub200'], flags=f'{VIT} -LT -ED'),
@@ -323,16 +495,15 @@ EXP = {
     'clip_PKT_ED':     dict(datasets=['cifar100'], flags=f'{VIT} -pret_clip -LT -ED'),
     'clip_PKT_ED_SKD': dict(datasets=['cifar100'], flags=f'{VIT} -pret_clip -LT -ED -SKD'),
 }
-
-def parse_results(path):
-    accs = ast.literal_eval(open(path).read().strip().splitlines()[-1])   # accuracy of every session
-    return accs
+PLAN = [(n, ds, s) for n, e in EXP.items() if n != 'smoke' for ds in e['datasets'] for s in e.get('seeds', SEEDS)]
 
 def finished_runs():
+    # results/all_runs.csv first, then this reproduction's results files (a repeated run's newer row wins)
     done = {}
-    for path in sorted(glob.glob(f'{RUNS}/results/runs*.csv')):   # runs.csv (Colab) and runs_runpod.csv (RunPod)
-        with open(path, newline='') as f:
-            done.update({(r['name'], r['dataset'], int(r['seed'])): r for r in csv.DictReader(f)})
+    for path in [f'{REPO}/results/all_runs.csv'] + sorted(glob.glob(f'{RUNS}/results/runs*.csv')):
+        if os.path.exists(path):
+            with open(path, newline='') as f:
+                done.update({(r['name'], r['dataset'], int(r['seed'])): r for r in csv.DictReader(f)})
     return done
 
 def describe_state(path):
@@ -341,14 +512,12 @@ def describe_state(path):
              else f"session {s['session']}/{s['sessions'] - 1}")
     return f"saved after {where} at {s['saved_at']}"
 
-_LOCK = threading.Lock()   # parallel runs share runs.csv, the CIFAR archive copy and the Drive upload
+_LOCK = threading.Lock()   # parallel runs share the results file, the CIFAR archive copy and the Drive upload
 CKPT_UPLOAD_MIN = 10       # RunPod: upload the checkpoints of running jobs to Drive this often (minutes)
 _UPLOADER = []
 
 def start_checkpoint_upload():
-    # RunPod only (Colab saves checkpoints straight into Drive). Every CKPT_UPLOAD_MIN minutes, copy runs_v2/resume/ to
-    # the shared Drive folder, so a stopped or lost pod loses at most that much training: a new pod's setup cell
-    # downloads the checkpoints and the same cell continues the runs.
+    # RunPod only (Colab saves checkpoints straight into Drive): a lost pod loses at most CKPT_UPLOAD_MIN of training
     if ON_COLAB or _UPLOADER:
         return
     def loop():
@@ -359,10 +528,9 @@ def start_checkpoint_upload():
     t = threading.Thread(target=loop, daemon=True)
     t.start()
     _UPLOADER.append(t)
-    print(f'Checkpoints of running jobs are copied to Drive every {CKPT_UPLOAD_MIN} min.')
 
 def run(name, dataset, seed, force=False, batch_size=128, gpu=None, quiet=False):
-    # gpu: physical GPU index for this run (multi-GPU pods); quiet: log only to the log file (used by run_parallel)
+    # force: run again even if finished. gpu: GPU index (multi-GPU pods). quiet: output only to the log (run_parallel).
     e = EXP[name]
     start_checkpoint_upload()
     epochs_base, epochs_new = e.get('epochs_base', 5), e.get('epochs_new', 3)
@@ -378,14 +546,15 @@ def run(name, dataset, seed, force=False, batch_size=128, gpu=None, quiet=False)
     state_json = f'{ckpt}/resume_state.json'
     resumed = os.path.exists(state_json)
     tag = f'[GPU {gpu}] ' if gpu is not None else ''
-    print(f'{tag}>> {name} | {dataset} | seed {seed}: ' + (f'RESUMING, {describe_state(state_json)}' if resumed else 'starting'), flush=True)
+    print(f'{tag}>> {name} | {dataset} | seed {seed}: ' + (f'RESUMING, {describe_state(state_json)}' if resumed else 'starting'),
+          flush=True)
     log = f'{RUNS}/logs/{name}_{dataset}_seed{seed}.log'
     cmd = (f'python train.py -project base -dataset {dataset} -base_mode ft_dot -new_mode avg_cos -gamma 0.1 '
            f'-lr_base 2e-4 -lr_new 2e-4 -decay 0.0005 -epochs_base {epochs_base} -epochs_new {epochs_new} '
            f'-schedule Cosine -milestones 20 30 45 -gpu 0 -temperature 16 -start_session 0 '
            f'-batch_size_base {batch_size} -seed {seed} {e["flags"]} -out {name} -dataroot {DATA} -ckpt_dir {ckpt}'
            + (' -grad_ckpt' if GRAD_CKPT else ''))
-    if gpu is not None:   # pin the process to one GPU before it starts CUDA (train.py keeps this setting)
+    if gpu is not None:   # pin the process to one GPU before it starts CUDA
         cmd = f'CUDA_VISIBLE_DEVICES={gpu} ' + cmd
     if not quiet:
         print(cmd, '\n')
@@ -410,53 +579,47 @@ def run(name, dataset, seed, force=False, batch_size=128, gpu=None, quiet=False)
         print(f'\n{tag}!! {name} | {dataset} | seed {seed} stopped before finishing ({msg}). Re-run to continue. Log: {log}',
               flush=True)
         with _LOCK:
-            drive_push(resume=True)   # RunPod: keep its latest checkpoint in Drive too
+            drive_push(resume=True)   # keep its latest checkpoint in Drive too
         return False
     dst = f'{RUNS}/results/{name}/{dataset}/seed{seed}'
     os.makedirs(dst, exist_ok=True)
     shutil.copy(hits[-1], f'{dst}/results.txt')
-    for pth in glob.glob(f'{os.path.dirname(hits[-1])}/*.pth'):   # model checkpoints (0.35-1 GB each): not needed for results
+    for pth in glob.glob(f'{os.path.dirname(hits[-1])}/*.pth'):   # model checkpoints (0.35-1 GB each): not needed
         os.remove(pth)
-    accs = parse_results(hits[-1])
+    accs = ast.literal_eval(open(hits[-1]).read().strip().splitlines()[-1])   # accuracy of every session
     a_base, a_last, a_avg = accs[0], accs[-1], sum(accs) / len(accs)
-    with _LOCK:   # one run at a time writes runs.csv and uploads to Drive
+    with _LOCK:
         new_file = not os.path.exists(LOG_CSV)
         with open(LOG_CSV, 'a', newline='') as f:
             w = csv.writer(f)
             if new_file:
                 w.writerow(['name', 'dataset', 'seed', 'flags', 'batch', 'gpu', 'commit', 'A_Base', 'A_Last', 'A_Avg',
                             'sessions', 'minutes', 'resumed', 'date'])
-            w.writerow([name, dataset, seed, e['flags'] + (' -grad_ckpt' if GRAD_CKPT else ''), batch_size, GPU, COMMIT, f'{a_base:.2f}', f'{a_last:.2f}',
-                        f'{a_avg:.2f}', json.dumps(accs), f'{minutes:.1f}', 'yes' if resumed else 'no',
-                        time.strftime('%Y-%m-%d %H:%M')])
-        shutil.rmtree(ckpt, ignore_errors=True)   # finished: free the Drive space of its resume state
-        drive_push()                               # RunPod: copy the log and results to the shared Drive folder
-        drive_drop_resume(name, dataset, seed)     # RunPod: and delete its uploaded checkpoint
+            w.writerow([name, dataset, seed, e['flags'] + (' -grad_ckpt' if GRAD_CKPT else ''), batch_size, GPU, COMMIT,
+                        f'{a_base:.2f}', f'{a_last:.2f}', f'{a_avg:.2f}', json.dumps(accs), f'{minutes:.1f}',
+                        'yes' if resumed else 'no', time.strftime('%Y-%m-%d %H:%M')])
+        shutil.rmtree(ckpt, ignore_errors=True)   # finished: its resume state is no longer needed
+        drive_push()
+        drive_drop_resume(name, dataset, seed)
     print(f'{tag}== {name} | {dataset} | seed {seed}: A_Base {a_base:.2f} | A_Last {a_last:.2f} | A_Avg {a_avg:.2f} | '
           f'{minutes:.1f} min', flush=True)
     return True
 
-def run_all(name, datasets=None, seeds=None):
+def run_all(name, datasets=None, seeds=None, force=False):
     e = EXP[name]
     for ds in datasets or e['datasets']:
         for s in seeds or e.get('seeds', SEEDS):
-            if not run(name, ds, s):   # stop at the first failure instead of failing every remaining seed
+            if not run(name, ds, s, force=force):   # stop at the first failure
                 raise SystemExit(f'Stopped: {name} | {ds} | seed {s} did not finish. Fix the error above, then re-run.')
 
-PLAN = [(n, ds, s) for n, e in EXP.items() if n != 'smoke'
-        for ds in e['datasets'] for s in e.get('seeds', SEEDS)]
-
 def run_parallel(jobs=None, seeds=None, gpus=None):
-    # Runs experiments side by side, one per GPU, until all are done. jobs: list of (name, dataset, seed), default every
-    # experiment in PLAN; seeds: keep only these seeds (e.g. [1, 2, 3] to save time). Finished runs are skipped,
+    # One run per GPU at a time (gpus=[0, 0] runs two side by side on one large GPU) until all are done, longest first.
+    # jobs: list of (name, dataset, seed), default PLAN; seeds: keep only these seeds. Finished runs are skipped,
     # interrupted ones resume. A failed run does not stop the others; failures are listed at the end.
-    import torch
     gpus = list(range(torch.cuda.device_count())) if gpus is None else gpus
     jobs = [j for j in (jobs or PLAN) if seeds is None or j[2] in seeds or EXP[j[0]].get('seeds')]
     done = finished_runs()
-    todo = [j for j in jobs if j not in done]
-    weight = {'cifar100': 3, 'mini_imagenet': 3, 'cub200': 1}   # longest runs first, so the GPUs finish together
-    todo.sort(key=lambda j: -weight[j[1]])
+    todo = sorted((j for j in jobs if j not in done), key=lambda j: -{'cifar100': 3, 'mini_imagenet': 3, 'cub200': 1}[j[1]])
     print(f'{len(jobs) - len(todo)} of {len(jobs)} runs already finished; {len(todo)} to run on GPUs {gpus}.')
     for ds in dict.fromkeys(j[1] for j in todo):   # extract each dataset once, before the parallel runs start
         prepare(ds)
@@ -485,211 +648,52 @@ def run_parallel(jobs=None, seeds=None, gpus=None):
         t.join()
     print(f'\nDone in {(time.time() - t0) / 3600:.1f} h. Failed: {failed or "none"}')
     if failed:
-        print('Check their logs in', f'{RUNS}/logs/', '(the last lines show the error), then run run_parallel() again.')
+        print('Their logs are in', f'{RUNS}/logs/', '(the last lines show the error); then run run_parallel() again.')
 
 def status():
     done = finished_runs()
-    rows, mins = [], collections.defaultdict(list)
-    for (n, ds, s), r in done.items():
-        mins[(n, ds)].append(float(r['minutes']))
+    rows = []
     for n, ds, s in PLAN:
         state_json = f'{RESUME}/{n}/{ds}/seed{s}/resume_state.json'
-        state = 'done' if (n, ds, s) in done else ('resumable' if os.path.exists(state_json) else 'not started')
-        rows.append((n, ds, state))
+        rows.append((n, ds, 'done' if (n, ds, s) in done else ('resumable' if os.path.exists(state_json) else 'not started')))
     df = pd.DataFrame(rows, columns=['experiment', 'dataset', 'state'])
-    table = df.groupby(['experiment', 'dataset'], sort=False)['state'].value_counts().unstack(fill_value=0)
-    display(table)
-    left = [(n, ds) for n, ds, st in rows if st != 'done']
-    per = {k: np.mean(v) for k, v in mins.items()}
-    by_ds = collections.defaultdict(list)
-    for (n, ds), v in mins.items():
-        by_ds[ds] += v
-    guess = [per.get(k, np.mean(by_ds[k[1]]) if by_ds[k[1]] else None) for k in left]
-    est, unknown = sum(g for g in guess if g is not None), sum(g is None for g in guess)
-    used = sum(sum(v) for v in mins.values())
-    print(f'{len(rows) - len(left)}/{len(rows)} runs done | GPU time used {used / 60:.1f} h | '
-          f'estimated time left {est / 60:.1f} h' +
-          (f' + {unknown} runs on datasets with no finished run yet' if unknown else ''))
-''')
+    display(df.groupby(['experiment', 'dataset'], sort=False)['state'].value_counts().unstack(fill_value=0))
+    print(f"{sum(st == 'done' for *_, st in rows)}/{len(rows)} planned runs done")
 
-code(r'''
-# Paper numbers: (mean, std) of A_Base, A_Last, A_Avg. Figure 3 has no table: those values were read off the plot
-# (per session, accuracy within about +/- 0.3).
-PAPER = {
-    'Table 1': {('PriViLege', 'cub200'):        [(82.21, .35), (75.08, .52), (77.50, .33)],
-                ('PriViLege', 'cifar100'):      [(90.88, .20), (86.06, .32), (88.08, .20)],
-                ('PriViLege', 'mini_imagenet'): [(96.68, .06), (94.10, .13), (95.27, .11)]},
-    'Table 3': {('abl_FT', 'cub200'):       [(84.21, .13), (3.79, 1.47), (21.60, 1.32)],
-                ('abl_PKT', 'cub200'):      [(79.06, .77), (70.81, .76), (73.36, .77)],
-                ('abl_PKT_ED', 'cub200'):   [(80.31, .54), (72.70, .45), (75.04, .40)],
-                ('abl_PKT_SKD', 'cub200'):  [(82.10, .57), (73.44, .40), (76.27, .30)],
-                ('PriViLege', 'cub200'):    [(82.21, .35), (75.08, .52), (77.50, .33)]},
-    'Table 4': {('layers_0', 'cub200'):  [(76.07, .56), (60.19, 1.11), (67.08, .71)],
-                ('abl_PKT', 'cub200'):   [(79.06, .77), (70.81, .76), (73.36, .77)],
-                ('layers_5', 'cub200'):  [(78.42, .84), (68.52, .84), (71.99, .84)],
-                ('layers_7', 'cub200'):  [(76.96, .74), (63.15, 2.73), (68.06, 1.54)],
-                ('layers_10', 'cub200'): [(74.95, .78), (57.78, 2.30), (64.19, 1.59)],
-                ('layers_12', 'cub200'): [(73.62, 2.72), (56.02, 1.47), (62.71, 2.14)]},
-}
-FIG3 = {   # Figure 3, accuracy per session (Base, 1..8)
-    'clip_zeroshot':   [78.8, 76.6, 75.2, 73.1, 72.5, 72.4, 72.7, 72.3, 71.0],
-    'clip_PKT':        [82.3, 79.5, 77.6, 75.4, 74.0, 73.2, 73.3, 72.6, 71.4],
-    'clip_PKT_ED':     [83.7, 81.2, 79.8, 77.6, 76.7, 76.3, 76.5, 76.2, 74.7],
-    'clip_PKT_ED_SKD': [84.2, 82.1, 81.0, 79.0, 78.8, 78.4, 78.6, 78.3, 77.1],
-}
-PAPER['Figure 3'] = {(n, 'cifar100'): [(v[0], None), (v[-1], None), (round(float(np.mean(v)), 2), None)]
-                     for n, v in FIG3.items()}
-LABELS = {'PriViLege': 'PriViLege (Ours)', 'abl_FT': 'Baseline (fine-tune + proto)', 'abl_PKT': 'PKT',
-          'abl_PKT_ED': 'PKT + L_ED', 'abl_PKT_SKD': 'PKT + L_SKD', 'layers_0': '0 layers', 'layers_5': '5 layers',
-          'layers_7': '7 layers', 'layers_10': '10 layers', 'layers_12': '12 layers',
-          'clip_zeroshot': 'CLIP zero-shot', 'clip_PKT': 'CLIP-PKT', 'clip_PKT_ED': 'CLIP-PKT + L_ED',
-          'clip_PKT_ED_SKD': 'CLIP-PKT + L_ED + L_SKD'}
-DS = {'cub200': 'CUB200', 'cifar100': 'CIFAR-100', 'mini_imagenet': 'miniImageNet'}
-METRICS = ['A_Base', 'A_Last', 'A_Avg']
-
-def runs_of(name, dataset):
-    return [r for (n, ds, s), r in sorted(finished_runs().items()) if n == name and ds == dataset]
-
-def ms(xs):
-    return f'{np.mean(xs):.2f} ± {np.std(xs, ddof=1) if len(xs) > 1 else 0:.2f}'
-
-def compare(table):
-    rows = []
-    for (name, ds), paper in PAPER[table].items():
-        label = LABELS[name] if name != 'abl_PKT' or table != 'Table 4' else '2 layers (= PKT)'
-        if table == 'Table 1':
-            label = DS[ds]
-        rs = runs_of(name, ds)
-        row = {'': label, 'seeds': len(rs)}
-        for i, m in enumerate(METRICS):
-            ours = [float(r[m]) for r in rs]
-            pm, ps = paper[i]
-            row[f'{m} ours'] = ms(ours) if ours else '—'
-            row[f'{m} paper'] = f'{pm:.2f}' + (f' ± {ps:.2f}' if ps is not None else ' (fig.)')
-            row[f'Δ {m}'] = round(np.mean(ours) - pm, 2) if ours else np.nan
-        rows.append(row)
-    df = pd.DataFrame(rows).set_index('')
-    def color(v):
-        if pd.isna(v): return ''
-        return 'color: green' if abs(v) <= 1 else ('color: orange' if abs(v) <= 3 else 'color: red')
-    display(Markdown(f'**{table}: ours vs. paper**'))
-    display(df.style.map(color, subset=[f'Δ {m}' for m in METRICS]).format(precision=2, na_rep='—'))
-
-def plot_sessions(items, title, paper_curves=None):
-    plt.figure(figsize=(7, 4))
-    for i, (name, ds) in enumerate(items):
-        rs = runs_of(name, ds)
-        c = f'C{i}'
-        label = DS[ds] if title.startswith('Table 1') else LABELS[name]
-        if rs:
-            acc = np.array([json.loads(r['sessions']) for r in rs])
-            x = np.arange(acc.shape[1])
-            plt.plot(x, acc.mean(0), '-o', color=c, ms=4, label=f'{label} (ours, n={len(rs)})')
-            if len(rs) > 1:
-                plt.fill_between(x, acc.mean(0) - acc.std(0, ddof=1), acc.mean(0) + acc.std(0, ddof=1), color=c, alpha=.15)
-        if paper_curves and name in paper_curves:
-            plt.plot(paper_curves[name], '--*', color=c, alpha=.7, label=f'{label} (paper)')
-    plt.xlabel('session (0 = base)'); plt.ylabel('accuracy (%)'); plt.title(title)
-    plt.grid(alpha=.3); plt.legend(fontsize=8); plt.tight_layout(); plt.show()
-
-def show(table):
-    compare(table)
-    items = list(PAPER[table])
-    plot_sessions(items, f'{table}: accuracy per session', FIG3 if table == 'Figure 3' else None)
+status()
 ''')
 
 md(r'''
-## 3. Status
-What is finished, resumable or not started, GPU time used so far and an estimate of the time left.
-''')
-code('status()')
-
-md(r'''
-## 4. Smoke test (1 base epoch + 1 epoch per session)
-Catches environment, data and code problems before the long runs. It passes if the log reaches `Incremental session: [8]`
-and the last line prints A_Base / A_Last / A_Avg. The numbers themselves are not meaningful.
-''')
-code("assert run('smoke', 'cifar100', seed=1), 'Smoke test failed: see the error above'")
-
-md(r'''
-## 4b. Quick checks on real data (before the full tables)
-One real CUB200 run (Table 1, seed 1; T4 ~30 min) and CLIP zero-shot (Figure 3, no training). Within about 1-2 points of the
-paper means the code is working: continue with the tables (on RunPod if you like). Far off: stop and check the log.
-''')
-
-code(r'''
-assert run('PriViLege', 'cub200', seed=1), 'CUB200 run failed: see the error above'
-assert run('clip_zeroshot', 'cifar100', seed=1), 'CLIP zero-shot failed: see the error above'
-done = finished_runs()
-for name, ds, paper in [('PriViLege', 'cub200', PAPER['Table 1'][('PriViLege', 'cub200')]),
-                        ('clip_zeroshot', 'cifar100', PAPER['Figure 3'][('clip_zeroshot', 'cifar100')])]:
-    r = done[(name, ds, 1)]
-    ours = [float(r[m]) for m in METRICS]
-    print(f"{name:14s} {ds:9s} A_Base / A_Last / A_Avg  ours {ours[0]:.2f} / {ours[1]:.2f} / {ours[2]:.2f}"
-          f"  paper {paper[0][0]:.2f} / {paper[1][0]:.2f} / {paper[2][0]:.2f}"
-          f"  | diff {ours[0] - paper[0][0]:+.2f} / {ours[1] - paper[1][0]:+.2f} / {ours[2] - paper[2][0]:+.2f}")
-''')
-
-md(r'''
-## 4c. Everything at once on a multi-GPU pod (RunPod)
-Runs every experiment of Tables 1, 3, 4 and Figure 3, one per GPU at the same time, longest first. With 8 x RTX 4090 the
-full plan (5 seeds) takes roughly 2.5-3 hours (4 x RTX 4090: 4-5 hours; `seeds=[1, 2, 3]` cuts either by 40%). Each run writes only to its own log
-(`runs_v2/logs/`); this cell prints one line per start and finish. Finished runs are skipped and interrupted ones resume,
-so after any stop just run the cell again. Then run section 9 for the comparison tables. (On a single GPU this also works,
-one run after another.) To watch a run live, in a terminal: `tail -f /workspace/privilege_drive/runs_v2/logs/<name>_<dataset>_seed<k>.log`
+## B3. Run
+Pick one line. Everything finished is skipped, so after any stop just run the same cell again. Watch a run live in a
+terminal: `tail -f <RUNS>/logs/<name>_<dataset>_seed<k>.log`.
 ''')
 code(r'''
-run_parallel()                    # all experiments, 5 seeds
-# run_parallel(seeds=[1, 2, 3])   # faster: 3 seeds
+run_parallel()                                    # every planned run not finished yet, one per GPU
+# run('smoke', 'cifar100', 1)                     # quick environment check: 1 epoch per session
+# run_all('abl_FT')                               # one experiment, all its seeds
+# run('layers_12', 'cub200', 3, force=True)       # repeat one finished run
 ''')
 
 md(r'''
-## 5. Table 1: PriViLege on the three benchmarks (5 seeds each)
-CUB200: 100 base classes + 10 sessions of 10-way 5-shot. CIFAR-100 and miniImageNet: 60 base classes + 8 sessions of 5-way 5-shot.
+## B4. Add the new runs to `results/all_runs.csv`
+Copies the results files of `runs_v2/results/` into `results/raw/` of this machine's repo and merges everything with
+`colab/merge_results.py` (checks every row, keeps one row per run, lists missing runs). Then run Part A again, and
+download `results/` or commit it so the next session starts from the new file.
 ''')
-code("run_all('PriViLege', ['cifar100'])\nshow('Table 1')")
-code("run_all('PriViLege', ['cub200'])\nshow('Table 1')")
-code("run_all('PriViLege', ['mini_imagenet'])\nshow('Table 1')")
+code(r'''
+for p in glob.glob(f'{RUNS}/results/runs*.csv'):
+    shutil.copy(p, f'{REPO}/results/raw/{os.path.basename(p)}')
+!cd {REPO} && python colab/merge_results.py results/raw/*.csv
+''')
 
 md(r'''
-## 6. Table 3: ablation on CUB200 (5 seeds each)
-- **Baseline** (`abl_FT`): fine-tuning the pre-trained ViT with the prototype classifier ψ: `-ft -plain_ft`. No prompts;
-  ViT blocks 0–1 and the classifier are trained in the base session, every parameter in the incremental sessions; the
-  prototypes and the test images use the same ViT CLS feature. The released `-ft` alone (the earlier `abl_Baseline` runs,
-  no longer shown) kept the classifier frozen and ran the images through prompts left at random values, and the
-  prototypes came from a different feature than the test images. The authors' compiled "Baseline" file is an
-  unfinished experiment that does not match the paper's description, so it is not used.
-- **PKT**, **PKT + L_ED**, **PKT + L_SKD**: the method without one or both losses. **Ours** reuses the Table 1 CUB200 runs.
+## B5. Free disk space (optional)
+Finished runs delete their `.pth` checkpoints; this removes any left by interrupted runs.
 ''')
-code("for name in ['abl_FT', 'abl_PKT', 'abl_PKT_ED', 'abl_PKT_SKD']:\n    run_all(name)\nshow('Table 3')")
+code("!find {REPO}/checkpoint -name '*.pth' -delete\n!df -h {DATA} | tail -1")
 
-md(r'''
-## 7. Table 4: number of tuned layers (CUB200, 5 seeds each)
-Run without the two losses, as in the paper; the 2-layer row is the PKT row of Table 3. `-taskblock` sets how many of the first
-ViT blocks are trained; the B-Prompt stays in blocks 0–1.
-''')
-code("for L in [0, 5, 7, 10, 12]:\n    run_all(f'layers_{L}')\nshow('Table 4')")
-
-md(r'''
-## 8. Figure 3: PriViLege on CLIP (CIFAR-100, 5 seeds each)
-Official open_clip CLIP ViT-B/16 pre-trained on LAION-2B. Only the vision encoder is trained, with the B-Prompt and VL-Prompt added
-on top of the official modules (`models/CLIP_prompt.py`); the frozen CLIP text encoder gives the class-name embeddings.
-The authors did not release this code: `models/base/ViT_Network_CLIP.py` and `models/base/CLIP_*.py` were rebuilt from their
-compiled files. The paper's values are read off the figure.
-''')
-code("for name in ['clip_zeroshot', 'clip_PKT', 'clip_PKT_ED', 'clip_PKT_ED_SKD']:\n    run_all(name)\nshow('Figure 3')")
-
-md(r'''
-## 9. All results vs. the paper
-''')
-code("for t in ['Table 1', 'Table 3', 'Table 4', 'Figure 3']:\n    compare(t)")
-
-md(r'''
-## 10. Free disk space (optional)
-Finished runs delete their `.pth` checkpoints automatically; this removes any left by interrupted or older runs.
-''')
-code("!find {REPO}/checkpoint -name '*.pth' -delete\n!df -h /content | tail -1")
-
+# =====================================================================================================================
 nb = {'cells': cells, 'metadata': {'colab': {'provenance': [], 'gpuType': 'T4'},
                                    'kernelspec': {'name': 'python3', 'display_name': 'Python 3'},
                                    'language_info': {'name': 'python'}, 'accelerator': 'GPU'},
@@ -697,5 +701,24 @@ nb = {'cells': cells, 'metadata': {'colab': {'provenance': [], 'gpuType': 'T4'},
 for c in nb['cells']:   # store source as a list of lines, like Jupyter does
     c['source'] = [l + '\n' for l in c['source'].split('\n')]
     c['source'][-1] = c['source'][-1].rstrip('\n')
-json.dump(nb, open(sys.argv[1], 'w', encoding='utf-8', newline='\n'), indent=1, ensure_ascii=False)   # utf-8: also works on Windows
-print('wrote', sys.argv[1], len(cells), 'cells')
+
+out = sys.argv[1]
+if '--run' in sys.argv:
+    # Run Part A (no GPU needed) from the notebook's folder, like Jupyter, and keep its outputs in the notebook
+    import nbformat
+    from nbclient import NotebookClient
+    part_a = [i for i, c in enumerate(nb['cells']) if c['metadata'].get('part') == 'A']
+    sub = nbformat.reads(json.dumps(dict(nb, cells=[nb['cells'][i] for i in part_a])), as_version=4)
+    NotebookClient(sub, timeout=300, kernel_name='python3',
+                   resources={'metadata': {'path': os.path.dirname(os.path.abspath(out))}}).execute()
+    for i, c in zip(part_a, sub.cells):
+        nb['cells'][i]['outputs'] = json.loads(json.dumps(c.outputs))
+        nb['cells'][i]['execution_count'] = c.execution_count
+        for o in nb['cells'][i]['outputs']:   # Jupyter's on-disk form: text as a list of lines
+            for k in ('text',):
+                if isinstance(o.get(k), str):
+                    o[k] = o[k].splitlines(True)
+for c in nb['cells']:
+    c['metadata'].pop('part', None)
+json.dump(nb, open(out, 'w', encoding='utf-8', newline='\n'), indent=1, ensure_ascii=False)
+print('wrote', out, len(cells), 'cells' + (' (Part A with outputs)' if '--run' in sys.argv else ''))

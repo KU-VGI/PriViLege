@@ -1,15 +1,15 @@
 # Merges the per-machine results files (runs.csv from Colab, runs_runpod*.csv from the pods) into results/all_runs.csv:
-# one row per (experiment, dataset, seed), in the order of the paper's tables. The results notebook
-# (colab/PriViLege_results.ipynb) reads only that file.
+# one row per (experiment, dataset, seed), in the order of the paper's tables. Part A of colab/PriViLege_colab.ipynb
+# reads its results from that file.
 #
 #   python colab/merge_results.py results/raw/*.csv          (writes results/all_runs.csv)
 #
 # Checks every row (session list length, A_Base / A_Last / A_Avg against the session list), drops smoke tests, keeps one
 # row when two machines finished the same run (their numbers must agree) and lists any planned run that is missing.
-import csv, json, os, sys
+import collections, csv, json, os, sys
 
-# Experiments in table order: name -> (datasets, seeds). abl_Baseline is the released -ft option, kept for reference
-# (Table 3 uses abl_FT, see colab/make_notebook.py section 6).
+# Experiments in table order: name -> (datasets, seeds). Rows of anything else (the smoke test, the earlier
+# abl_Baseline runs of the released -ft option) are left out: Table 3's Baseline is abl_FT.
 PLAN = {
     'PriViLege':       (['cifar100', 'cub200', 'mini_imagenet'], [1, 2, 3, 4, 5]),
     'abl_FT':          (['cub200'], [1, 2, 3, 4, 5]),
@@ -21,7 +21,6 @@ PLAN = {
     'clip_PKT':        (['cifar100'], [1, 2, 3, 4, 5]),
     'clip_PKT_ED':     (['cifar100'], [1, 2, 3, 4, 5]),
     'clip_PKT_ED_SKD': (['cifar100'], [1, 2, 3, 4, 5]),
-    'abl_Baseline':    (['cub200'], [1, 2, 3, 4, 5]),
 }
 SESSIONS = {'cub200': 11, 'cifar100': 9, 'mini_imagenet': 9}   # base session + incremental sessions
 FIELDS = ['name', 'dataset', 'seed', 'A_Base', 'A_Last', 'A_Avg', 'sessions', 'flags', 'commit', 'gpu', 'batch',
@@ -46,13 +45,14 @@ def main(paths, out='results/all_runs.csv'):
         with open(path, newline='', encoding='utf-8') as f:
             rows = list(csv.DictReader(f))
         print(f'{path}: {len(rows)} rows')
+        skipped = collections.Counter(r['name'] for r in rows if r['name'] not in PLAN)
+        if skipped:
+            print('  left out (not in the tables):', ', '.join(f'{n} ({k} rows)' for n, k in skipped.items()))
         for r in rows:
-            if r['name'] == 'smoke':
+            if r['name'] not in PLAN:
                 continue
             r['source'] = os.path.basename(path)
             key = (r['name'], r['dataset'], int(r['seed']))
-            if r['name'] not in PLAN:
-                print('  not in the plan, kept:', *key)
             problems = check(r)
             if problems:
                 bad += 1
@@ -60,9 +60,12 @@ def main(paths, out='results/all_runs.csv'):
             if key in runs:
                 old = runs[key]
                 same = all(abs(float(old[m]) - float(r[m])) < 0.006 for m in ['A_Base', 'A_Last', 'A_Avg'])
+                newer = r['date'] > old['date']
                 print(f"  duplicate {key[0]} {key[1]} seed {key[2]}: in {old['source']} and {r['source']}, numbers "
-                      + ('identical, kept the first' if same else 'DIFFER, kept the first: check both logs'))
-                continue
+                      + ('identical, kept one' if same else
+                         f"differ (a repeated run?), kept the newer one from {(r if newer else old)['date']}"))
+                if same or not newer:
+                    continue
             runs[key] = r
 
     order = {n: i for i, n in enumerate(PLAN)}
