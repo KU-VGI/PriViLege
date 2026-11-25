@@ -6,7 +6,7 @@ def md(s): cells.append({'cell_type': 'markdown', 'metadata': {}, 'source': s.st
 def code(s): cells.append({'cell_type': 'code', 'metadata': {}, 'execution_count': None, 'outputs': [], 'source': s.strip('\n')})
 
 md(r'''
-# PriViLege (CVPR 2024): reproduction on Colab
+# PriViLege (CVPR 2024): reproduction on Colab or RunPod
 
 Runs the authors' code (branch `colab-fixes` of `AkilaDissanayake/PriViLege`) for the paper's results:
 **Table 1** (CUB200, CIFAR-100, miniImageNet), **Tables 3 and 4** (ablations on CUB200) and **Figure 3** (PriViLege on CLIP, CIFAR-100).
@@ -15,8 +15,31 @@ Every experiment cell ends with a table of our numbers next to the paper's.
 - **GPU:** A100 is fastest. On a 16 GB GPU (T4) the runner turns on gradient checkpointing (`-grad_ckpt`) so batch 128 fits:
   same results, slower runs. VS Code: Select Kernel → Colab → **New Colab Server** → GPU. Press **Ctrl+S** after a cell finishes so its output is saved in the .ipynb.
 - **Every Colab session:** run the Setup cells (1a–1e), then the experiment cell you want.
-- **If Colab stops:** run Setup again and re-run the same cell. Finished runs are skipped; an interrupted run continues from its last checkpoint in Drive (`MyDrive/PriViLege/resume/`).
-- Datasets download into `MyDrive/PriViLege/datasets/` the first time they are needed.
+- **If Colab stops:** run Setup again and re-run the same cell. Finished runs are skipped; an interrupted run continues from its last checkpoint in Drive (`PriViLege/resume/`).
+- Datasets download into `PriViLege/datasets/` the first time they are needed.
+
+**Drive: the shared project folder.** Datasets, logs, results and resume states live in one shared folder
+(https://drive.google.com/drive/folders/1UuLlbEoUMMv8ShyRU-x117Ir3ePqYPeq), owned by a friend's Google account. Do this once
+for every Google account that will run the notebook:
+1. The owner opens the folder → **Share** → adds that Google account as **Editor**.
+2. Signed in as that account, open the link above (or drive.google.com → **Shared with me**), right-click the folder →
+   **Organize → Add shortcut** → **My Drive**.
+
+Colab can only see a shared folder through such a shortcut. Cell 1a finds it by its folder id, so renaming or moving the
+shortcut is fine, and it checks the folder is writable. The owner needs no shortcut. Files the runs create there (logs,
+results, resume states: small) count against the storage of the account that runs Colab, because it owns them. The dataset
+archives count against whoever uploaded them, so let the owner's Drive keep those.
+
+**RunPod (or any other Jupyter GPU machine).** The same notebook runs there: cell 1a notices it is not on Colab and keeps
+everything in `/workspace/privilege_drive` on the pod's persistent volume. Cell 1a-2 copies the shared Drive folder's
+`datasets/`, `logs/` and `results/` to the pod with rclone, and every run copies its log and results back to the Drive
+folder (as `results/runs_runpod.csv`, so it never overwrites rows written from Colab). Pick a 24 GB GPU (RTX 4090, or the
+paper's RTX 3090): batch 128 then fits without `-grad_ckpt`. Use a RunPod PyTorch template with a volume on `/workspace`.
+
+Link rclone to Google Drive once (the token is saved on the volume, in `/workspace/rclone.conf`, never in the notebook):
+1. On your own PC (PowerShell): `winget install Rclone.Rclone`, open a new terminal, run `rclone authorize "drive"`.
+   A browser opens: sign in with the Google account that has Editor access to the shared folder.
+2. Copy the token the terminal prints (one line, from `{` to `}`), run cell 1a-2 on the pod and paste it when asked.
 ''')
 
 md(r'''
@@ -24,26 +47,111 @@ md(r'''
 ''')
 
 code(r'''
-# 1a. Drive (keeps datasets, logs and results after the VM is wiped) and the fast local disk for training data
-from google.colab import drive
-drive.mount('/content/drive')
+# 1a. Where datasets, logs and results live.
+# Colab: the shared Drive folder, mounted. RunPod / other machines: a folder on the persistent volume, synced with the
+# same shared Drive folder by rclone (cell 1a-2).
+# The shared project folder: https://drive.google.com/drive/folders/1UuLlbEoUMMv8ShyRU-x117Ir3ePqYPeq
+DRIVE_FOLDER_ID = '1UuLlbEoUMMv8ShyRU-x117Ir3ePqYPeq'
+DRIVE_FOLDER    = 'PriViLege'   # fallback: a folder with this name directly in My Drive (e.g. for the owner)
+import os, glob, uuid
+try:
+    import google.colab
+    ON_COLAB = True
+except ImportError:
+    ON_COLAB = False
 
-import os
-DRIVE = '/content/drive/MyDrive/PriViLege'
-DATA  = '/content/data'
-REPO  = '/content/PriViLege'
+def find_drive_folder():
+    # A shortcut in My Drive exposes the shared folder here, whatever the shortcut is called or where it sits
+    hits = [p for p in glob.glob(f'/content/drive/.shortcut-targets-by-id/{DRIVE_FOLDER_ID}/*') if os.path.isdir(p)]
+    if hits:
+        return hits[0]
+    own = f'/content/drive/MyDrive/{DRIVE_FOLDER}'
+    return own if os.path.isdir(own) else None
+
+if ON_COLAB:
+    from google.colab import drive
+    drive.mount('/content/drive')
+    DATA  = '/content/data'
+    REPO  = '/content/PriViLege'
+    DRIVE = find_drive_folder()
+else:
+    BASE  = '/workspace' if os.path.isdir('/workspace') else os.path.expanduser('~')   # RunPod's persistent volume
+    DATA  = f'{BASE}/data'
+    REPO  = f'{BASE}/PriViLege'
+    DRIVE = f'{BASE}/privilege_drive'   # local copy of the shared Drive folder
+    os.makedirs(DRIVE, exist_ok=True)
+# Stop here instead of quietly creating an empty folder in the wrong Drive and downloading everything again.
+if DRIVE is None:
+    raise FileNotFoundError('The shared Drive folder is not visible to this account. Open '
+                            f'https://drive.google.com/drive/folders/{DRIVE_FOLDER_ID} while signed in as the account '
+                            'you mounted, right-click the folder -> Organize -> Add shortcut -> My Drive, then run this cell '
+                            'again. If the link says you need access, ask the owner to share it with you as Editor.')
+probe = f'{DRIVE}/.write_test_{uuid.uuid4().hex[:8]}'
+try:
+    open(probe, 'w').close(); os.remove(probe)
+except OSError as e:
+    raise PermissionError(f'{DRIVE} is read-only for this account: ask the folder owner to share it with you as Editor.') from e
 for d in ['datasets', 'logs', 'results']:
     os.makedirs(f'{DRIVE}/{d}', exist_ok=True)
 os.makedirs(DATA, exist_ok=True)
+print('Running on', 'Colab' if ON_COLAB else 'RunPod / local Jupyter', '| folder:', DRIVE, '| contents:', sorted(os.listdir(DRIVE)))
 !nvidia-smi --query-gpu=name,memory.total --format=csv
 ''')
 
 code(r'''
-# 1b. Code: the colab-fixes branch (Colab patches + the CLIP and loader fixes). The commit id is logged with every result.
+# 1a-2. RunPod only (does nothing on Colab): link to the shared Drive folder with rclone, then copy its datasets/, logs/
+# and results/ to the pod. drive_push() copies logs/ and results/ back after every run.
+import subprocess, shutil
+
+def drive_push():
+    pass   # Colab writes straight into the mounted Drive folder
+
+if not ON_COLAB:
+    import urllib.request, zipfile, getpass
+    RCLONE      = f'{BASE}/bin/rclone'
+    RCLONE_CONF = f'{BASE}/rclone.conf'   # on the volume: survives pod restarts. Contains your Drive token: do not share it.
+    if not os.path.exists(RCLONE):        # install rclone on the volume once
+        os.makedirs(f'{BASE}/bin', exist_ok=True)
+        zpath = f'{BASE}/bin/rclone.zip'
+        urllib.request.urlretrieve('https://downloads.rclone.org/v1.68.2/rclone-v1.68.2-linux-amd64.zip', zpath)
+        with zipfile.ZipFile(zpath) as z:
+            member = next(n for n in z.namelist() if n.endswith('/rclone'))
+            with z.open(member) as src, open(RCLONE, 'wb') as dst:
+                shutil.copyfileobj(src, dst)
+        os.chmod(RCLONE, 0o755); os.remove(zpath)
+
+    def rclone(*args):
+        return subprocess.run([RCLONE, '--config', RCLONE_CONF, *args], text=True, capture_output=True)
+
+    if 'gdrive:' not in rclone('listremotes').stdout:
+        token = getpass.getpass('Paste the token printed by `rclone authorize "drive"` on your PC: ').strip()
+        r = rclone('config', 'create', 'gdrive', 'drive', 'scope=drive', f'root_folder_id={DRIVE_FOLDER_ID}',
+                   f'token={token}', '--non-interactive')
+        if r.returncode != 0:
+            raise RuntimeError('rclone config failed: ' + r.stderr[-500:])
+    r = rclone('lsf', 'gdrive:', '--max-depth', '1')
+    if r.returncode != 0:
+        raise RuntimeError('Cannot read the shared Drive folder with rclone. Check that the account you signed in with has '
+                           f'Editor access, or delete {RCLONE_CONF} and run this cell again. ' + r.stderr[-500:])
+    print('Shared Drive folder contents:', r.stdout.split())
+    for d in ['datasets', 'logs', 'results']:   # --update: never replace a newer file on the pod with an older one
+        print(f'Copying Drive {d}/ to the pod ...')
+        get_ipython().system(f'{RCLONE} --config {RCLONE_CONF} copy gdrive:{d} "{DRIVE}/{d}" --update --stats-one-line -P')
+
+    def drive_push():
+        for d in ['logs', 'results']:
+            r = rclone('copy', f'{DRIVE}/{d}', f'gdrive:{d}', '--update')
+            if r.returncode != 0:
+                print(f'!! Could not copy {d}/ to Drive (the files are safe on the pod volume):', r.stderr[-300:])
+''')
+
+code(r'''
+# 1b. Code: the t4-fixes branch (colab-fixes + T4 memory and NaN fixes). The commit id is logged with every result.
+BRANCH = 't4-fixes'
 if not os.path.exists(REPO):
-    !git clone -b colab-fixes https://github.com/AkilaDissanayake/PriViLege.git {REPO}
+    !git clone -b {BRANCH} https://github.com/AkilaDissanayake/PriViLege.git {REPO}
 else:
-    !git -C {REPO} pull
+    !git -C {REPO} fetch -q origin && git -C {REPO} checkout -q {BRANCH} && git -C {REPO} pull -q
 %cd {REPO}
 COMMIT = !git rev-parse --short HEAD
 COMMIT = COMMIT[0]
@@ -54,16 +162,18 @@ code(r'''
 # 1c. Packages. Not requirements.txt (a full Anaconda dump that breaks Colab).
 # timm 0.6.13 loads the same ViT-B/16 checkpoint as the authors' 0.6.12 (which fails to import on Python 3.12);
 # open_clip is only needed for the CLIP experiments (Figure 3).
-!pip install -q timm==0.6.13 open_clip_torch
+!pip install -q timm==0.6.13 open_clip_torch gdown
 import timm, torch, transformers, pandas, open_clip
 print('timm', timm.__version__, '| torch', torch.__version__, '| transformers', transformers.__version__,
       '| pandas', pandas.__version__, '| open_clip', open_clip.__version__)
 assert timm.__version__ == '0.6.13', 'Restart the session (Runtime -> Restart session / VS Code Restart) and run 1a-1c again'
-assert torch.cuda.is_available(), ('No GPU: this is a CPU runtime and every run would fail. Browser: Runtime -> Change runtime '
-                                   'type -> A100/L4 GPU. VS Code: Select Kernel -> Colab -> New Colab Server -> GPU.')
+assert torch.cuda.is_available(), ('No GPU: this is a CPU runtime and every run would fail. Colab: Runtime -> Change runtime '
+                                   'type -> GPU. VS Code: Select Kernel -> Colab -> New Colab Server -> GPU. RunPod: '
+                                   'start a GPU pod.')
 GPU = torch.cuda.get_device_name(0)
 GPU_GB = torch.cuda.get_device_properties(0).total_memory / 2**30
-GRAD_CKPT = GPU_GB < 20   # T4 (16 GB): batch 128 only fits with gradient checkpointing (same results, slower)
+GRAD_CKPT = GPU_GB < 20   # T4 (16 GB): batch 128 only fits with gradient checkpointing (same results, slower).
+                          # 24 GB and up (RTX 3090/4090, L40S, A100): not needed.
 print(f'GPU: {GPU} ({GPU_GB:.0f} GB)' + (' -> -grad_ckpt on' if GRAD_CKPT else ''))
 ''')
 
@@ -135,7 +245,7 @@ md(r'''
 ## 2. Experiments, runner and paper targets
 
 `run()` calls `train.py` with the official arguments (`run_script/vit_run_pretrain.py`) plus each experiment's flags.
-It skips runs already in `MyDrive/PriViLege/results/runs.csv`, resumes interrupted runs, appends the log to Drive and records
+It skips runs already in `PriViLege/results/runs.csv` (in Drive), resumes interrupted runs, appends the log to Drive and records
 A_Base / A_Last / A_Avg and every session's accuracy. In the comparison tables Δ = ours − paper:
 green |Δ| ≤ 1, orange ≤ 3, red > 3.
 ''')
@@ -146,7 +256,8 @@ import numpy as np, pandas as pd
 import matplotlib.pyplot as plt
 from IPython.display import display, Markdown
 
-LOG_CSV = f'{DRIVE}/results/runs.csv'
+# One results file per kind of machine, so a RunPod sync never overwrites rows written from Colab (and vice versa)
+LOG_CSV = f'{DRIVE}/results/runs.csv' if ON_COLAB else f'{DRIVE}/results/runs_runpod.csv'
 RESUME  = f'{DRIVE}/resume'
 SEEDS   = [1, 2, 3, 4, 5]
 VIT     = '-vit -comp_out 1'
@@ -176,10 +287,11 @@ def parse_results(path):
     return accs
 
 def finished_runs():
-    if not os.path.exists(LOG_CSV):
-        return {}
-    with open(LOG_CSV, newline='') as f:
-        return {(r['name'], r['dataset'], int(r['seed'])): r for r in csv.DictReader(f)}
+    done = {}
+    for path in sorted(glob.glob(f'{DRIVE}/results/runs*.csv')):   # runs.csv (Colab) and runs_runpod.csv (RunPod)
+        with open(path, newline='') as f:
+            done.update({(r['name'], r['dataset'], int(r['seed'])): r for r in csv.DictReader(f)})
+    return done
 
 def describe_state(path):
     s = json.load(open(path))
@@ -221,6 +333,7 @@ def run(name, dataset, seed, force=False, batch_size=128):
     if not hits:
         msg = describe_state(state_json) if os.path.exists(state_json) else 'no checkpoint saved yet'
         print(f'\n!! Run stopped before finishing ({msg}). Re-run this cell to continue. Log: {log}')
+        drive_push()
         return False
     dst = f'{DRIVE}/results/{name}/{dataset}/seed{seed}'
     os.makedirs(dst, exist_ok=True)
@@ -237,6 +350,7 @@ def run(name, dataset, seed, force=False, batch_size=128):
                     f'{a_avg:.2f}', json.dumps(accs), f'{minutes:.1f}', 'yes' if resumed else 'no',
                     time.strftime('%Y-%m-%d %H:%M')])
     shutil.rmtree(ckpt, ignore_errors=True)   # finished: free the Drive space of its resume state
+    drive_push()                               # RunPod: copy the log and results to the shared Drive folder
     print(f'\n== {name} | {dataset} | seed {seed}: A_Base {a_base:.2f} | A_Last {a_last:.2f} | A_Avg {a_avg:.2f} | {minutes:.1f} min')
     return True
 
@@ -418,12 +532,12 @@ Each run leaves large `.pth` checkpoints on the Colab disk. Results and resume s
 ''')
 code("!find {REPO}/checkpoint -name '*.pth' -delete\n!df -h /content | tail -1")
 
-nb = {'cells': cells, 'metadata': {'colab': {'provenance': [], 'gpuType': 'A100'},
+nb = {'cells': cells, 'metadata': {'colab': {'provenance': [], 'gpuType': 'T4'},
                                    'kernelspec': {'name': 'python3', 'display_name': 'Python 3'},
                                    'language_info': {'name': 'python'}, 'accelerator': 'GPU'},
       'nbformat': 4, 'nbformat_minor': 0}
 for c in nb['cells']:   # store source as a list of lines, like Jupyter does
     c['source'] = [l + '\n' for l in c['source'].split('\n')]
     c['source'][-1] = c['source'][-1].rstrip('\n')
-json.dump(nb, open(sys.argv[1], 'w'), indent=1, ensure_ascii=False)
+json.dump(nb, open(sys.argv[1], 'w', encoding='utf-8', newline='\n'), indent=1, ensure_ascii=False)   # utf-8: also works on Windows
 print('wrote', sys.argv[1], len(cells), 'cells')
