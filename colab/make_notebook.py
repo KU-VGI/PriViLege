@@ -170,7 +170,10 @@ if not ON_COLAB:
     def drive_push(resume=False):
         # logs and results after every run; resume=True: also the checkpoints of running jobs (every few minutes)
         for d in [f'{RUN_SET}/logs', f'{RUN_SET}/results'] + ([f'{RUN_SET}/resume'] if resume else []):
-            r = rclone('copy', f'{DRIVE}/{d}', f'gdrive:{d}', '--update', '--exclude', '*.tmp')
+            # Logs of running jobs keep growing while they upload, so their checksum can never match: upload them
+            # as they are (the next push sends the rest). Results and checkpoints keep the checksum check.
+            grow = ['--local-no-check-updated', '--ignore-checksum'] if d.endswith('/logs') else []
+            r = rclone('copy', f'{DRIVE}/{d}', f'gdrive:{d}', '--update', '--exclude', '*.tmp', *grow)
             if r.returncode != 0:
                 print(f'!! Could not copy {d}/ to Drive (the files are safe on the pod volume):', r.stderr[-300:])
 
