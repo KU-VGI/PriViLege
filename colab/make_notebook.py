@@ -161,6 +161,9 @@ if not ON_COLAB:
     # resume/: checkpoints of unfinished runs (from Colab or an earlier pod), so this pod continues them
     SYNC = ['datasets', f'{RUN_SET}/logs', f'{RUN_SET}/results', f'{RUN_SET}/resume']
     for d in SYNC:   # --update: never replace a newer file on the pod with an older one
+        if rclone('lsf', f'gdrive:{d}', '--max-depth', '1').returncode != 0:
+            print(f'Drive {d}/: nothing there yet (it is created when the first run finishes)')
+            continue
         print(f'Copying Drive {d}/ to the pod ...')
         get_ipython().system(f'{RCLONE} --config {RCLONE_CONF} copy gdrive:{d} "{DRIVE}/{d}" --update --stats-one-line -P')
 
