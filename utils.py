@@ -39,7 +39,10 @@ def set_gpu(args):
     gpu_list = [int(x) for x in args.gpu.split(',')]
     print('use gpu:', gpu_list)
     os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-    os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+    # Keep a GPU choice made by the caller (the notebook's parallel runner starts each run with CUDA_VISIBLE_DEVICES=k):
+    # train.py has already started CUDA at this point, so changing the variable here would not move the run anyway.
+    if 'CUDA_VISIBLE_DEVICES' not in os.environ:
+        os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     return gpu_list.__len__()
 
 

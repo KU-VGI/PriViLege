@@ -28,7 +28,9 @@ read, so every experiment here starts from the beginning. Datasets in `PriViLege
 Run **1a → 1a-2 → 1b → 1c → 1d → 1e**, then the two cells of section 2, then **3. Status**.
 - Colab: Runtime → Change runtime type → **T4 GPU** (or better). If 1c stops at the timm check: Runtime → **Restart
   session**, then run 1a–1c again.
-- RunPod: a PyTorch template, an RTX 4090 or 3090 (24 GB: no `-grad_ckpt`, faster), a **100 GB volume** on `/workspace`.
+- RunPod: a PyTorch template and a **100 GB volume** on `/workspace`. GPU: RTX 4090 or 5090 (24/32 GB: no `-grad_ckpt`).
+  For speed take **several of them in one pod** (e.g. 8 x RTX 4090) and use section 4c: the code runs in fp32, where an
+  H100/A100 is no faster than a 4090.
   In a JupyterLab terminal: `cd /workspace && wget https://raw.githubusercontent.com/AkilaDissanayake/PriViLege/t4-fixes/colab/PriViLege_colab.ipynb`,
   open it, and paste the rclone token when 1a-2 asks (once per volume).
 
@@ -42,7 +44,9 @@ Run **1a → 1a-2 → 1b → 1c → 1d → 1e**, then the two cells of section 2
 ### If anything stops
 Re-run the setup cells and the same experiment cell: finished runs are skipped, an interrupted run resumes from its last
 saved epoch or session. Training stops on its own at the first NaN loss (a `FloatingPointError`): send the last 30 lines of
-the output. On RunPod every finished run is copied to the shared Drive folder (`runs_v2/`) at once.
+the output. On RunPod every finished run is copied to the shared Drive folder (`runs_v2/`) at once, and the checkpoints of
+running jobs every 10 minutes (`runs_v2/resume/`). A new pod's setup cell downloads them, so even after terminating a pod
+the next one (or Colab) continues each unfinished run from its last uploaded checkpoint.
 ''')
 
 md(r'''
@@ -111,8 +115,11 @@ code(r'''
 # and results/ to the pod. drive_push() copies logs/ and results/ back after every run.
 import subprocess, shutil
 
-def drive_push():
-    pass   # Colab writes straight into the mounted Drive folder
+def drive_push(resume=False):
+    pass   # Colab writes straight into the mounted Drive folder (logs, results and resume states)
+
+def drive_drop_resume(name, dataset, seed):
+    pass
 
 if not ON_COLAB:
     import urllib.request, zipfile, getpass
@@ -142,16 +149,22 @@ if not ON_COLAB:
         raise RuntimeError('Cannot read the shared Drive folder with rclone. Check that the account you signed in with has '
                            f'Editor access, or delete {RCLONE_CONF} and run this cell again. ' + r.stderr[-500:])
     print('Shared Drive folder contents:', r.stdout.split())
-    SYNC = ['datasets', f'{RUN_SET}/logs', f'{RUN_SET}/results']   # resume states stay on the volume
+    # resume/: checkpoints of unfinished runs (from Colab or an earlier pod), so this pod continues them
+    SYNC = ['datasets', f'{RUN_SET}/logs', f'{RUN_SET}/results', f'{RUN_SET}/resume']
     for d in SYNC:   # --update: never replace a newer file on the pod with an older one
         print(f'Copying Drive {d}/ to the pod ...')
         get_ipython().system(f'{RCLONE} --config {RCLONE_CONF} copy gdrive:{d} "{DRIVE}/{d}" --update --stats-one-line -P')
 
-    def drive_push():
-        for d in [f'{RUN_SET}/logs', f'{RUN_SET}/results']:
-            r = rclone('copy', f'{DRIVE}/{d}', f'gdrive:{d}', '--update')
+    def drive_push(resume=False):
+        # logs and results after every run; resume=True: also the checkpoints of running jobs (every few minutes)
+        for d in [f'{RUN_SET}/logs', f'{RUN_SET}/results'] + ([f'{RUN_SET}/resume'] if resume else []):
+            r = rclone('copy', f'{DRIVE}/{d}', f'gdrive:{d}', '--update', '--exclude', '*.tmp')
             if r.returncode != 0:
                 print(f'!! Could not copy {d}/ to Drive (the files are safe on the pod volume):', r.stderr[-300:])
+
+    def drive_drop_resume(name, dataset, seed):
+        # a finished run's checkpoint is no longer needed in Drive
+        rclone('purge', f'gdrive:{RUN_SET}/resume/{name}/{dataset}/seed{seed}')
 ''')
 
 code(r'''
@@ -262,7 +275,7 @@ green |Δ| ≤ 1, orange ≤ 3, red > 3.
 ''')
 
 code(r'''
-import ast, csv, glob, json, time, collections
+import ast, csv, glob, json, time, collections, threading, queue, subprocess
 import numpy as np, pandas as pd
 import matplotlib.pyplot as plt
 from IPython.display import display, Markdown
@@ -310,8 +323,30 @@ def describe_state(path):
              else f"session {s['session']}/{s['sessions'] - 1}")
     return f"saved after {where} at {s['saved_at']}"
 
-def run(name, dataset, seed, force=False, batch_size=128):
+_LOCK = threading.Lock()   # parallel runs share runs.csv, the CIFAR archive copy and the Drive upload
+CKPT_UPLOAD_MIN = 10       # RunPod: upload the checkpoints of running jobs to Drive this often (minutes)
+_UPLOADER = []
+
+def start_checkpoint_upload():
+    # RunPod only (Colab saves checkpoints straight into Drive). Every CKPT_UPLOAD_MIN minutes, copy runs_v2/resume/ to
+    # the shared Drive folder, so a stopped or lost pod loses at most that much training: a new pod's setup cell
+    # downloads the checkpoints and the same cell continues the runs.
+    if ON_COLAB or _UPLOADER:
+        return
+    def loop():
+        while True:
+            time.sleep(CKPT_UPLOAD_MIN * 60)
+            with _LOCK:
+                drive_push(resume=True)
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+    _UPLOADER.append(t)
+    print(f'Checkpoints of running jobs are copied to Drive every {CKPT_UPLOAD_MIN} min.')
+
+def run(name, dataset, seed, force=False, batch_size=128, gpu=None, quiet=False):
+    # gpu: physical GPU index for this run (multi-GPU pods); quiet: log only to the log file (used by run_parallel)
     e = EXP[name]
+    start_checkpoint_upload()
     epochs_base, epochs_new = e.get('epochs_base', 5), e.get('epochs_new', 3)
     done = finished_runs().get((name, dataset, seed))
     ckpt = f'{RESUME}/{name}/{dataset}/seed{seed}'
@@ -324,27 +359,40 @@ def run(name, dataset, seed, force=False, batch_size=128):
     prepare(dataset)
     state_json = f'{ckpt}/resume_state.json'
     resumed = os.path.exists(state_json)
-    print(f'>> {name} | {dataset} | seed {seed}: ' + (f'RESUMING, {describe_state(state_json)}' if resumed else 'starting'))
+    tag = f'[GPU {gpu}] ' if gpu is not None else ''
+    print(f'{tag}>> {name} | {dataset} | seed {seed}: ' + (f'RESUMING, {describe_state(state_json)}' if resumed else 'starting'), flush=True)
     log = f'{RUNS}/logs/{name}_{dataset}_seed{seed}.log'
     cmd = (f'python train.py -project base -dataset {dataset} -base_mode ft_dot -new_mode avg_cos -gamma 0.1 '
            f'-lr_base 2e-4 -lr_new 2e-4 -decay 0.0005 -epochs_base {epochs_base} -epochs_new {epochs_new} '
            f'-schedule Cosine -milestones 20 30 45 -gpu 0 -temperature 16 -start_session 0 '
            f'-batch_size_base {batch_size} -seed {seed} {e["flags"]} -out {name} -dataroot {DATA} -ckpt_dir {ckpt}'
            + (' -grad_ckpt' if GRAD_CKPT else ''))
-    print(cmd, '\n')
+    if gpu is not None:   # pin the process to one GPU before it starts CUDA (train.py keeps this setting)
+        cmd = f'CUDA_VISIBLE_DEVICES={gpu} ' + cmd
+    if not quiet:
+        print(cmd, '\n')
     with open(log, 'a') as f:
-        f.write(f"\n===== {'resume' if resumed else 'start'} {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
+        f.write(f"\n===== {'resume' if resumed else 'start'} {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n{cmd}\n")
     t0 = time.time()
-    get_ipython().system(f'cd {REPO} && {cmd} 2>&1 | tee -a {log}')
+    if quiet:
+        subprocess.run(['bash', '-c', f'cd {REPO} && {cmd} >> {log} 2>&1'])
+    else:
+        get_ipython().system(f'cd {REPO} && {cmd} 2>&1 | tee -a {log}')
     minutes = (time.time() - t0) / 60
     if dataset == 'cifar100':
-        save_cifar_to_drive()
-    hits = sorted((p for p in glob.glob(f'{REPO}/checkpoint/**/*seed_{seed}*/results.txt', recursive=True)
+        with _LOCK:
+            save_cifar_to_drive()
+    # This run's own results.txt (another run with the same seed may finish at the same time). The -clip zero-shot
+    # trainer ignores -out and writes to checkpoint/Ours_Baseline.
+    out_dir = 'Ours_Baseline' if '-clip ' in e['flags'] + ' ' else name
+    hits = sorted((p for p in glob.glob(f'{REPO}/checkpoint/{out_dir}/{dataset}/**/*seed_{seed}*/results.txt', recursive=True)
                    if os.path.getmtime(p) > t0), key=os.path.getmtime)
     if not hits:
         msg = describe_state(state_json) if os.path.exists(state_json) else 'no checkpoint saved yet'
-        print(f'\n!! Run stopped before finishing ({msg}). Re-run this cell to continue. Log: {log}')
-        drive_push()
+        print(f'\n{tag}!! {name} | {dataset} | seed {seed} stopped before finishing ({msg}). Re-run to continue. Log: {log}',
+              flush=True)
+        with _LOCK:
+            drive_push(resume=True)   # RunPod: keep its latest checkpoint in Drive too
         return False
     dst = f'{RUNS}/results/{name}/{dataset}/seed{seed}'
     os.makedirs(dst, exist_ok=True)
@@ -353,18 +401,21 @@ def run(name, dataset, seed, force=False, batch_size=128):
         os.remove(pth)
     accs = parse_results(hits[-1])
     a_base, a_last, a_avg = accs[0], accs[-1], sum(accs) / len(accs)
-    new_file = not os.path.exists(LOG_CSV)
-    with open(LOG_CSV, 'a', newline='') as f:
-        w = csv.writer(f)
-        if new_file:
-            w.writerow(['name', 'dataset', 'seed', 'flags', 'batch', 'gpu', 'commit', 'A_Base', 'A_Last', 'A_Avg',
-                        'sessions', 'minutes', 'resumed', 'date'])
-        w.writerow([name, dataset, seed, e['flags'] + (' -grad_ckpt' if GRAD_CKPT else ''), batch_size, GPU, COMMIT, f'{a_base:.2f}', f'{a_last:.2f}',
-                    f'{a_avg:.2f}', json.dumps(accs), f'{minutes:.1f}', 'yes' if resumed else 'no',
-                    time.strftime('%Y-%m-%d %H:%M')])
-    shutil.rmtree(ckpt, ignore_errors=True)   # finished: free the Drive space of its resume state
-    drive_push()                               # RunPod: copy the log and results to the shared Drive folder
-    print(f'\n== {name} | {dataset} | seed {seed}: A_Base {a_base:.2f} | A_Last {a_last:.2f} | A_Avg {a_avg:.2f} | {minutes:.1f} min')
+    with _LOCK:   # one run at a time writes runs.csv and uploads to Drive
+        new_file = not os.path.exists(LOG_CSV)
+        with open(LOG_CSV, 'a', newline='') as f:
+            w = csv.writer(f)
+            if new_file:
+                w.writerow(['name', 'dataset', 'seed', 'flags', 'batch', 'gpu', 'commit', 'A_Base', 'A_Last', 'A_Avg',
+                            'sessions', 'minutes', 'resumed', 'date'])
+            w.writerow([name, dataset, seed, e['flags'] + (' -grad_ckpt' if GRAD_CKPT else ''), batch_size, GPU, COMMIT, f'{a_base:.2f}', f'{a_last:.2f}',
+                        f'{a_avg:.2f}', json.dumps(accs), f'{minutes:.1f}', 'yes' if resumed else 'no',
+                        time.strftime('%Y-%m-%d %H:%M')])
+        shutil.rmtree(ckpt, ignore_errors=True)   # finished: free the Drive space of its resume state
+        drive_push()                               # RunPod: copy the log and results to the shared Drive folder
+        drive_drop_resume(name, dataset, seed)     # RunPod: and delete its uploaded checkpoint
+    print(f'{tag}== {name} | {dataset} | seed {seed}: A_Base {a_base:.2f} | A_Last {a_last:.2f} | A_Avg {a_avg:.2f} | '
+          f'{minutes:.1f} min', flush=True)
     return True
 
 def run_all(name, datasets=None, seeds=None):
@@ -376,6 +427,47 @@ def run_all(name, datasets=None, seeds=None):
 
 PLAN = [(n, ds, s) for n, e in EXP.items() if n != 'smoke'
         for ds in e['datasets'] for s in e.get('seeds', SEEDS)]
+
+def run_parallel(jobs=None, seeds=None, gpus=None):
+    # Runs experiments side by side, one per GPU, until all are done. jobs: list of (name, dataset, seed), default every
+    # experiment in PLAN; seeds: keep only these seeds (e.g. [1, 2, 3] to save time). Finished runs are skipped,
+    # interrupted ones resume. A failed run does not stop the others; failures are listed at the end.
+    import torch
+    gpus = list(range(torch.cuda.device_count())) if gpus is None else gpus
+    jobs = [j for j in (jobs or PLAN) if seeds is None or j[2] in seeds or EXP[j[0]].get('seeds')]
+    done = finished_runs()
+    todo = [j for j in jobs if j not in done]
+    weight = {'cifar100': 3, 'mini_imagenet': 3, 'cub200': 1}   # longest runs first, so the GPUs finish together
+    todo.sort(key=lambda j: -weight[j[1]])
+    print(f'{len(jobs) - len(todo)} of {len(jobs)} runs already finished; {len(todo)} to run on GPUs {gpus}.')
+    for ds in dict.fromkeys(j[1] for j in todo):   # extract each dataset once, before the parallel runs start
+        prepare(ds)
+    q = queue.Queue()
+    for j in todo:
+        q.put(j)
+    failed, t0 = [], time.time()
+    def worker(gpu):
+        while True:
+            try:
+                name, ds, seed = q.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                ok = run(name, ds, seed, gpu=gpu, quiet=True)
+            except Exception as ex:   # keep the other GPUs busy
+                print(f'[GPU {gpu}] !! {name} | {ds} | seed {seed}: {ex}', flush=True)
+                ok = False
+            if not ok:
+                failed.append((name, ds, seed))
+            print(f'   {q.qsize()} runs waiting | {(time.time() - t0) / 3600:.1f} h elapsed', flush=True)
+    threads = [threading.Thread(target=worker, args=(g,)) for g in gpus]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    print(f'\nDone in {(time.time() - t0) / 3600:.1f} h. Failed: {failed or "none"}')
+    if failed:
+        print('Check their logs in', f'{RUNS}/logs/', '(the last lines show the error), then run run_parallel() again.')
 
 def status():
     done = finished_runs()
@@ -518,6 +610,19 @@ for name, ds, paper in [('PriViLege', 'cub200', PAPER['Table 1'][('PriViLege', '
     print(f"{name:14s} {ds:9s} A_Base / A_Last / A_Avg  ours {ours[0]:.2f} / {ours[1]:.2f} / {ours[2]:.2f}"
           f"  paper {paper[0][0]:.2f} / {paper[1][0]:.2f} / {paper[2][0]:.2f}"
           f"  | diff {ours[0] - paper[0][0]:+.2f} / {ours[1] - paper[1][0]:+.2f} / {ours[2] - paper[2][0]:+.2f}")
+''')
+
+md(r'''
+## 4c. Everything at once on a multi-GPU pod (RunPod)
+Runs every experiment of Tables 1, 3, 4 and Figure 3, one per GPU at the same time, longest first. With 8 x RTX 4090 the
+full plan (5 seeds) takes roughly 2.5-3 hours (4 x RTX 4090: 4-5 hours; `seeds=[1, 2, 3]` cuts either by 40%). Each run writes only to its own log
+(`runs_v2/logs/`); this cell prints one line per start and finish. Finished runs are skipped and interrupted ones resume,
+so after any stop just run the cell again. Then run section 9 for the comparison tables. (On a single GPU this also works,
+one run after another.) To watch a run live, in a terminal: `tail -f /workspace/privilege_drive/runs_v2/logs/<name>_<dataset>_seed<k>.log`
+''')
+code(r'''
+run_parallel()                    # all experiments, 5 seeds
+# run_parallel(seeds=[1, 2, 3])   # faster: 3 seeds
 ''')
 
 md(r'''
