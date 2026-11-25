@@ -122,13 +122,22 @@ def drive_drop_resume(name, dataset, seed):
     pass
 
 if not ON_COLAB:
-    import urllib.request, zipfile, getpass
+    import zipfile, getpass
     RCLONE      = f'{BASE}/bin/rclone'
     RCLONE_CONF = f'{BASE}/rclone.conf'   # on the volume: survives pod restarts. Contains your Drive token: do not share it.
     if not os.path.exists(RCLONE):        # install rclone on the volume once
         os.makedirs(f'{BASE}/bin', exist_ok=True)
         zpath = f'{BASE}/bin/rclone.zip'
-        urllib.request.urlretrieve('https://downloads.rclone.org/v1.68.2/rclone-v1.68.2-linux-amd64.zip', zpath)
+        url = 'https://downloads.rclone.org/v1.68.2/rclone-v1.68.2-linux-amd64.zip'
+        # curl, as in rclone's own install script (the server refuses Python's urllib with 403 Forbidden); wget if no curl
+        ok = False
+        for cmd in (['curl', '-fsSL', '-o', zpath, url], ['wget', '-q', '-O', zpath, url]):
+            if shutil.which(cmd[0]) and subprocess.run(cmd).returncode == 0:
+                ok = True
+                break
+        if not ok or not os.path.exists(zpath):
+            raise RuntimeError(f'Could not download rclone from {url}. Install it by hand into {RCLONE} (see the header), '
+                               'then run this cell again.')
         with zipfile.ZipFile(zpath) as z:
             member = next(n for n in z.namelist() if n.endswith('/rclone'))
             with z.open(member) as src, open(RCLONE, 'wb') as dst:
