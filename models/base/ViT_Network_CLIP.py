@@ -144,6 +144,8 @@ class ViT_MYNET_CLIP(nn.Module):
                     loss = loss_ce + loss_kb
                 else:
                     loss = loss_ce
+                if not torch.isfinite(loss):   # stop at once instead of training on NaN
+                    raise FloatingPointError(f'Non-finite loss in session {session}, epoch {epoch}: {loss.item()}')
 
                 optim.zero_grad()
                 loss.backward()

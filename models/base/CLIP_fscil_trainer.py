@@ -25,8 +25,7 @@ class CLIP_FSCILTrainer(Trainer):
         self.val_model = CLIP((self.args), mode=(self.args.base_mode))
         self.model = nn.DataParallel(self.model, list(range(self.args.num_gpu)))
         self.model = self.model.cuda()
-        self.val_model = nn.DataParallel(self.val_model, list(range(self.args.num_gpu)))
-        self.val_model = self.val_model.cuda()
+        del self.val_model   # never used; built only to keep the random-number sequence (see ViT_fscil_trainer)
         self.text_labels = []
         if self.args.model_dir is not None:
             print("Loading init parameters from: %s" % self.args.model_dir)

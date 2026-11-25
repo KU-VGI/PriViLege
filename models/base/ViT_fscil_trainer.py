@@ -90,9 +90,11 @@ class ViT_FSCILTrainer(Trainer):
         self.model = nn.DataParallel(self.model, list(range(self.args.num_gpu)))
         self.model = self.model.cuda()
 
-        self.val_model = nn.DataParallel(self.val_model, list(range(self.args.num_gpu)))
-        self.val_model = self.val_model.cuda()
-        
+        #* val_model is never used. It is still built above, so the random-number sequence (and so every
+        #* seed's data order) matches the authors' code, but it is not kept: on a 16 GB T4 it would hold
+        #* another full encoder in GPU memory.
+        del self.val_model
+
         self.word_info = {}
         self.word_info["embed"] = None
         self.word_info["cur_embed"] = None

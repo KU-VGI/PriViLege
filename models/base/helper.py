@@ -175,7 +175,10 @@ def base_train(model, trainloader, optimizer, scheduler, epoch, word_info, query
         
         acc = count_acc(logits_, train_label)
         total_loss = loss_ce + args.ED_hp*loss_tri + loss_kb
-        
+        if not torch.isfinite(total_loss):   # stop at once instead of training on NaN for hours
+            raise FloatingPointError('Non-finite loss at base epoch {} step {}: CE={} ED={} SKD={}'.format(
+                epoch, i, loss_ce.item(), loss_tri.item(), loss_kb.item()))
+
         lrc = scheduler.get_last_lr()[0]
         tl.add(total_loss.item(), len(train_label))
         ta.add(acc, len(train_label))
@@ -220,7 +223,11 @@ def triplet(cls_embed, vision_embed, query_info, train_label,loss_curve):
     cls_logit[idx, train_label]=0.
     vis_logit[idx, train_label]=0.
     
-    l_kl = F.kl_div(F.log_softmax(vis_logit,dim=1), F.softmax(cls_logit,dim=1), reduction='batchmean')
+    #* Same KL(cls || vis) as the original F.kl_div(log_softmax(vis), softmax(cls)), but with the target in log space.
+    #* The psi logits are in the hundreds, so softmax(cls) underflows to exactly 0 for most classes. The target
+    #* carries gradients here (both tokens are trained), and the backward of a probability-space target takes
+    #* log(0) = -inf, which turns every gradient into NaN after the first step. log_target=True never takes log(0).
+    l_kl = F.kl_div(F.log_softmax(vis_logit,dim=1), F.log_softmax(cls_logit,dim=1), reduction='batchmean', log_target=True)
     l_ent = vis_gt.mean() + cls_gt.mean()
     
     loss_tri = ((l_ent/l_kl)+1).log()
