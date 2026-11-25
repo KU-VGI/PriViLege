@@ -196,7 +196,9 @@ code(r'''
 # 1c. Packages. Not requirements.txt (a full Anaconda dump that breaks Colab).
 # timm 0.6.13 loads the same ViT-B/16 checkpoint as the authors' 0.6.12 (which fails to import on Python 3.12);
 # open_clip is only needed for the CLIP experiments (Figure 3).
-!pip install -q timm==0.6.13 open_clip_torch gdown
+# transformers, pandas, scikit-learn, matplotlib and tqdm come with Colab but not with RunPod's PyTorch image
+# (pip leaves packages that are already installed as they are).
+!pip install -q timm==0.6.13 open_clip_torch gdown transformers pandas scikit-learn matplotlib tqdm
 import timm, torch, transformers, pandas, open_clip
 print('timm', timm.__version__, '| torch', torch.__version__, '| transformers', transformers.__version__,
       '| pandas', pandas.__version__, '| open_clip', open_clip.__version__)
