@@ -56,6 +56,8 @@ def get_command_line_parser():
     parser.add_argument('-start_session', type=int, default=1)
     parser.add_argument('-model_dir', type=str, default=MODEL_DIR, help='loading model parameter from a specific dir')
     parser.add_argument('-set_no_val', action='store_true', help='set validation using test set or no validation')
+    parser.add_argument('-ckpt_dir', type=str, default=None,
+                        help='save a resume state here after every base epoch and session; resume from it if present')
 
     # about training
     parser.add_argument('-gpu', default='2, 3')
@@ -74,6 +76,8 @@ def get_command_line_parser():
     parser.add_argument('-ED_hp', type=float, default=0.1)
     
     parser.add_argument('-LT', action='store_true')
+    parser.add_argument('-grad_ckpt', action='store_true',
+                        help='gradient checkpointing: same results, less GPU memory (for 16 GB GPUs such as a T4)')
     parser.add_argument('-WC', action='store_true')
     parser.add_argument('-MP', action='store_true')
     
@@ -91,6 +95,9 @@ def get_command_line_parser():
     parser.add_argument('-scratch', action='store_true')
     parser.add_argument('-taskblock', type=int, default=2)
     parser.add_argument('-ft', action='store_true')
+    parser.add_argument('-plain_ft', action='store_true',
+                        help='with -ft: plain fine-tuning baseline (paper Table 3). No prompts: every path uses the ViT '
+                             'CLS feature, the same feature the prototypes are built from, and the classifier is trained')
     parser.add_argument('-lp', action='store_true')
     parser.add_argument('-PKT_tune_way', type=int, default=1)
     

@@ -6,6 +6,9 @@ import copy
 from copy import deepcopy
 import pandas as pd
 from os.path import exists as is_exists
+import json
+import random
+import numpy as np
 
 from .helper import *
 from utils import *
@@ -21,8 +24,13 @@ class ViT_FSCILTrainer(Trainer):
         self.set_log_path()
 
         self.args = set_up_datasets(self.args)
-        self.model = ViT_MYNET(self.args, mode=self.args.base_mode)
-        
+        if self.args.pret_clip:
+            # Restored from the authors' compiled trainer: PriViLege on CLIP (paper Figure 3)
+            from .ViT_Network_CLIP import ViT_MYNET_CLIP
+            self.model = ViT_MYNET_CLIP(self.args, mode=self.args.base_mode)
+        else:
+            self.model = ViT_MYNET(self.args, mode=self.args.base_mode)
+
         if self.args.LT:
             print("Tuning Layer!!")
             if self.args.pret_clip:
@@ -62,11 +70,14 @@ class ViT_FSCILTrainer(Trainer):
             for p in self.model.parameters():
                 p.requires_grad=False
                 
-            num_layer = [l for l in range(args.taskblock)] 
+            num_layer = [l for l in range(args.taskblock)]
             for idx, block in enumerate(self.model.encoder.blocks):
                 if idx in num_layer:
                     for p in block.parameters():
                         p.requires_grad=True
+            if self.args.plain_ft:   # plain fine-tuning: the classifier is trained with the tuned blocks
+                for p in self.model.fc.parameters():
+                    p.requires_grad=True
         elif self.args.lp:
             pass
         else:
@@ -82,9 +93,11 @@ class ViT_FSCILTrainer(Trainer):
         self.model = nn.DataParallel(self.model, list(range(self.args.num_gpu)))
         self.model = self.model.cuda()
 
-        self.val_model = nn.DataParallel(self.val_model, list(range(self.args.num_gpu)))
-        self.val_model = self.val_model.cuda()
-        
+        #* val_model is never used. It is still built above, so the random-number sequence (and so every
+        #* seed's data order) matches the authors' code, but it is not kept: on a 16 GB T4 it would hold
+        #* another full encoder in GPU memory.
+        del self.val_model
+
         self.word_info = {}
         self.word_info["embed"] = None
         self.word_info["cur_embed"] = None
@@ -183,9 +196,25 @@ class ViT_FSCILTrainer(Trainer):
 
         columns = ['num_session', 'acc', 'base_acc', 'new_acc', 'base_acc_given_new', 'new_acc_given_base']
         acc_df = pd.DataFrame(columns=columns)
-        print("[Start Session: {}] [Sessions: {}]".format(args.start_session, args.sessions))
-        
-        for session in range(args.start_session, args.sessions):
+
+        #* Resume (only with -ckpt_dir): continue after the last saved base epoch or session
+        resume = None
+        start_session, start_epoch = args.start_session, 0
+        if self._resume_enabled() and os.path.exists(self._resume_path()):
+            resume = self._load_resume()   # None if the saved state held NaN/inf weights: start fresh
+        if resume is not None:
+            result_list = [args] + resume['result_list']
+            if resume['phase'] == 'base':
+                start_session, start_epoch = 0, resume['epoch'] + 1
+                print('[resume] continuing the base session at epoch {}/{}'.format(start_epoch + 1, args.epochs_base))
+            else:
+                start_session = resume['session'] + 1
+                print('[resume] continuing at session {}/{}'.format(start_session, args.sessions - 1))
+            if resume['phase'] == 'session':
+                self._restore_rng(resume['rng'])
+        print("[Start Session: {}] [Sessions: {}]".format(start_session, args.sessions))
+
+        for session in range(start_session, args.sessions):
             
             train_set, trainloader, testloader = self.get_dataloader(session)
             print(f"Session: {session} Data Config")
@@ -197,6 +226,8 @@ class ViT_FSCILTrainer(Trainer):
                         for p in block.parameters():
                             p.requires_grad=False
                     for p in self.model.module.encoder.transformer.key_comp.parameters():
+                        p.requires_grad = False
+                    for p in self.model.module.encoder.transformer.val_comp.parameters():   # restored from the authors' compiled trainer
                         p.requires_grad = False
                     self.model.module.encoder.expert_prompt.requires_grad=False
                 elif args.ft:
@@ -223,21 +254,27 @@ class ViT_FSCILTrainer(Trainer):
                 
                 print('new classes for this session:\n', np.unique(train_set.targets))
                 optimizer, scheduler = self.get_optimizer_base()
-                
-                #todo Build Word Embedding..
-                print("Build Word Information..")
-                if args.pret_clip:
-                    build_label_embedding(train_set, session, self.model.module, self.tokenizer, self.word_info, args)
+
+                if resume is not None:
+                    #* Word embeddings and base prototypes were restored with the resume state
+                    optimizer.load_state_dict(resume['optimizer'])
+                    scheduler.load_state_dict(resume['scheduler'])
+                    self.Bert_model = self.Bert_model.cpu()
                 else:
-                    build_label_embedding(train_set, session, self.Bert_model, self.tokenizer, self.word_info, args)
-                self.Bert_model = self.Bert_model.cpu()
-                print("Total Word vector info:", self.word_info["embed"].shape)
-                print("Current Word vector info:", self.word_info["cur_embed"].shape)
-                print("Current Word label info:", self.word_info["label_text"].shape)
-                print()
-                # if not self.args.pret_clip:
-                print("Build Base query prototype Information..")
-                build_base_proto(trainloader, self.model, self.query_info, args)
+                    #todo Build Word Embedding..
+                    print("Build Word Information..")
+                    if args.pret_clip:
+                        build_label_embedding(train_set, session, self.model.module, self.tokenizer, self.word_info, args)
+                    else:
+                        build_label_embedding(train_set, session, self.Bert_model, self.tokenizer, self.word_info, args)
+                    self.Bert_model = self.Bert_model.cpu()
+                    print("Total Word vector info:", self.word_info["embed"].shape)
+                    print("Current Word vector info:", self.word_info["cur_embed"].shape)
+                    print("Current Word label info:", self.word_info["label_text"].shape)
+                    print()
+                    # if not self.args.pret_clip:
+                    print("Build Base query prototype Information..")
+                    build_base_proto(trainloader, self.model, self.query_info, args)
                 print("Base Proto vector info:", self.query_info["proto"].shape)
                 # print("Base Proto Matrix info:", self.query_info["rel_matrix"].shape)
                 print("[Base Session Training]")
@@ -245,7 +282,9 @@ class ViT_FSCILTrainer(Trainer):
                 trainable_params = sum(param.numel() for param in self.model.parameters() if param.requires_grad)
                 print('[Session {}] Trainable parameters: {}'.format(session,trainable_params))
                 print("#"*50)
-                for epoch in range(args.epochs_base):
+                if resume is not None:
+                    self._restore_rng(resume['rng'])
+                for epoch in range(start_epoch, args.epochs_base):
                     start_time = time.time()
                     # train base sess
                     tl, ta = base_train(self.model, trainloader, optimizer, scheduler, epoch, self.word_info, self.query_info, np.unique(train_set.targets), args, self.loss_curve)
@@ -273,6 +312,7 @@ class ViT_FSCILTrainer(Trainer):
                             '\nstill need around %.2f mins to finish this session' % (
                                     (time.time() - start_time) * (args.epochs_base - epoch) / 60))
                     scheduler.step()
+                    self._save_resume('base', session, epoch, result_list, optimizer, scheduler)
 
                 result_list.append('Session {}, Test Best Epoch {},\nbest test Acc {:.4f}\n'.format(
                     session, self.trlog['max_acc_epoch'], self.trlog['max_acc'][session], ))
@@ -293,7 +333,8 @@ class ViT_FSCILTrainer(Trainer):
                     tsl, tsa, logs = test(self.model, testloader, 0, args, session,self.word_info)
                     self.trlog['max_acc'][session] = float('%.3f' % (tsa * 100))
                     print('The new best test acc of base session={:.3f}'.format(self.trlog['max_acc'][session]))
-            
+                self._save_resume('session', session, None, result_list)
+
             else:  # incremental learning sessions
                 print("Incremental session: [%d]" % session)
                 print("#"*50)
@@ -321,7 +362,7 @@ class ViT_FSCILTrainer(Trainer):
                 self.model.eval()
                 self.model.module.mode = 'avg_cos'
                 tsl, tsa, logs = test(self.model, testloader, 0, args, session,self.word_info)
-                acc_df = acc_df.append(logs, ignore_index=True)
+                acc_df = pd.concat([acc_df, pd.DataFrame([logs])], ignore_index=True)
                 
                 print("Build Vision ProtoType")
 
@@ -333,7 +374,8 @@ class ViT_FSCILTrainer(Trainer):
                 print('  test acc={:.3f}'.format(self.trlog['max_acc'][session]))
 
                 result_list.append('Session {}, test Acc {:.3f}\n'.format(session, self.trlog['max_acc'][session]))
-            
+                self._save_resume('session', session, None, result_list)
+
         result_list.append('Base Session Best Epoch {}\n'.format(self.trlog['max_acc_epoch']))
         result_list.append(self.trlog['max_acc'])
         print(self.trlog['max_acc'])
@@ -349,6 +391,107 @@ class ViT_FSCILTrainer(Trainer):
         print('[Begin] Total parameters: {}'.format(self.init_params))
         print('[END] Total parameters: {}'.format(end_params))
         
+    #* ------------------------------------------------------------------
+    #* Resume support (-ckpt_dir). A state file is saved after every base
+    #* epoch and every session; a restarted run continues from it.
+    #* ------------------------------------------------------------------
+    RESUME_ARGS = ['dataset', 'seed', 'epochs_base', 'epochs_new', 'lr_base', 'lr_new', 'batch_size_base',
+                   'schedule', 'base_mode', 'new_mode', 'ED', 'ED_hp', 'SKD', 'LT', 'taskblock', 'comp_out',
+                   'prefix', 'vit', 'pret_clip']
+
+    def _resume_enabled(self):
+        return bool(getattr(self.args, 'ckpt_dir', None))
+
+    def _resume_path(self):
+        return os.path.join(self.args.ckpt_dir, 'resume_state.pt')
+
+    def _resume_fingerprint(self):
+        return {k: getattr(self.args, k, None) for k in self.RESUME_ARGS}
+
+    def _model_state_for_resume(self):
+        #* With -LT, encoder weights outside the tuned blocks stay at their pre-trained
+        #* values and timm reloads them on restart, so they are not saved.
+        state = self.model.state_dict()
+        if not self.args.LT or self.args.pret_clip:
+            return state
+        keep = tuple('module.encoder.blocks.%d.' % i for i in range(self.args.taskblock)) + ('module.encoder.head.',)
+        return {k: v for k, v in state.items() if not k.startswith('module.encoder.') or k.startswith(keep)}
+
+    @staticmethod
+    def _nonfinite_keys(state_dict):
+        return [k for k, v in state_dict.items()
+                if torch.is_tensor(v) and v.is_floating_point() and not torch.isfinite(v).all()]
+
+    def _save_resume(self, phase, session, epoch, result_list, optimizer=None, scheduler=None):
+        if not self._resume_enabled():
+            return
+        model_state = self._model_state_for_resume()
+        bad = self._nonfinite_keys(model_state)
+        if bad:   # never replace the last good resume state with broken weights
+            raise FloatingPointError('Not saving the resume state: NaN/inf weights in {} (e.g. {}). The previous resume '
+                                     'state is kept.'.format(len(bad), bad[:3]))
+        state = {
+            'phase': phase, 'session': session, 'epoch': epoch,
+            'fingerprint': self._resume_fingerprint(),
+            'model': model_state,
+            'optimizer': optimizer.state_dict() if optimizer is not None else None,
+            'scheduler': scheduler.state_dict() if scheduler is not None else None,
+            'trlog': self.trlog,
+            'word_info': self.word_info,
+            'query_info': self.query_info,
+            'seen_classes': self.model.module.seen_classes,
+            'result_list': result_list[1:],
+            'rng': {'torch': torch.get_rng_state(),
+                    'cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+                    'numpy': np.random.get_state(),
+                    'python': random.getstate()},
+        }
+        os.makedirs(self.args.ckpt_dir, exist_ok=True)
+        path = self._resume_path()
+        torch.save(state, path + '.tmp')
+        os.replace(path + '.tmp', path)
+        info = {'phase': phase, 'session': session, 'epoch': epoch, 'sessions': self.args.sessions,
+                'epochs_base': self.args.epochs_base, 'saved_at': time.strftime('%Y-%m-%d %H:%M:%S')}
+        with open(os.path.join(self.args.ckpt_dir, 'resume_state.json'), 'w') as f:
+            json.dump(info, f)
+        print('[resume] state saved: phase={} session={} epoch={}'.format(phase, session, epoch))
+
+    def _load_resume(self):
+        path = self._resume_path()
+        try:
+            state = torch.load(path, map_location='cpu', weights_only=False)
+        except TypeError:  # torch < 1.13 has no weights_only
+            state = torch.load(path, map_location='cpu')
+        if state['fingerprint'] != self._resume_fingerprint():
+            raise ValueError('Resume state in {} was saved with different arguments.\nsaved: {}\nnow:   {}\n'
+                             'Delete that folder or use another -ckpt_dir.'.format(
+                                 self.args.ckpt_dir, state['fingerprint'], self._resume_fingerprint()))
+        bad = self._nonfinite_keys(state['model'])
+        if bad:   # e.g. saved by the code from before the L_ED NaN fix: unusable, so set it aside and start fresh
+            os.replace(path, path + '.nan')
+            print('[resume] {} has NaN/inf weights ({} tensors, e.g. {}): moved it to {}.nan and starting this run '
+                  'from scratch.'.format(path, len(bad), bad[:3], path))
+            return None
+        missing, unexpected = self.model.load_state_dict(state['model'], strict=False)
+        not_encoder = [k for k in missing if not k.startswith('module.encoder.')]
+        if unexpected or not_encoder:
+            raise RuntimeError('Resume state does not match the model: unexpected={} missing={}'.format(
+                unexpected, not_encoder))
+        self.trlog = state['trlog']
+        self.word_info = state['word_info']
+        self.query_info = state['query_info']
+        self.model.module.seen_classes = state['seen_classes']
+        print('[resume] loaded {} (phase={} session={} epoch={})'.format(
+            path, state['phase'], state['session'], state['epoch']))
+        return state
+
+    def _restore_rng(self, rng):
+        torch.set_rng_state(rng['torch'])
+        if torch.cuda.is_available() and rng['cuda']:
+            torch.cuda.set_rng_state_all(rng['cuda'])
+        np.random.set_state(rng['numpy'])
+        random.setstate(rng['python'])
+
     def set_save_path(self):
         mode = self.args.base_mode + '-' + self.args.new_mode
         if not self.args.not_data_init:

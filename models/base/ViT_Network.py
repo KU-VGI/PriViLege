@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from models.resnet18_encoder import *
 from models.resnet20_cifar import *
 from models.resnet18_cifar import resnet18_cifar
@@ -14,7 +15,7 @@ from models.vision_transformer import VisionTransformer
 #todo PKT with B-Prompt ==> Prefix Tuning 
 #todo Need Something to focus on domain specific knowledge learning 
 #todo finc inciteness from the Novel Category Discovery 
-import open_clip as clip
+# import open_clip as clip
 class ViT_MYNET(nn.Module):
 
     def __init__(self, args, mode=None):
@@ -82,6 +83,14 @@ class ViT_MYNET(nn.Module):
         return x
     
     def prompt_encode(self, img, prompt_feat=False, B_tuning=False, eval=False):
+        if getattr(self.args, 'plain_ft', False):
+            # Plain fine-tuning baseline: no prompts. Training, testing and the incremental sessions use the ViT CLS
+            # feature, the same feature encode() gives the prototype classifier (replace_base_fc, update_fc_avg).
+            # Callers average cls and 'Vision', so the logits are fc(cls).
+            cls_embed = self._plain_cls(img)
+            if prompt_feat:
+                return cls_embed, {'Vision': cls_embed, 'Language': cls_embed}
+            return cls_embed
         x = self.encoder.patch_embed(img)
         ex_cls = self.encoder.cls_token.expand(x.shape[0], -1, -1)
         x = torch.cat([ex_cls,x],dim=1)
@@ -110,17 +119,35 @@ class ViT_MYNET(nn.Module):
         else:
             return cls_embed
     
+    def _plain_cls(self, img):
+        # The same computation as encode() (timm forward_features, CLS token), written out so that -grad_ckpt can
+        # recompute the blocks with use_reentrant=False. timm's own checkpointing is reentrant and, with a frozen patch
+        # embedding, would silently give the tuned blocks no gradient.
+        enc = self.encoder
+        x = enc.patch_embed(img)
+        x = torch.cat([enc.cls_token.expand(x.shape[0], -1, -1), x], dim=1)
+        x = enc.norm_pre(enc.pos_drop(x + enc.pos_embed))
+        ckpt = getattr(self.args, 'grad_ckpt', False) and self.training and torch.is_grad_enabled()
+        for block in enc.blocks:
+            x = checkpoint(block, x, use_reentrant=False) if ckpt else block(x)
+        return enc.norm(x)[:, 0]
+
     def _forward_blocks(self, x, prefix_tkn, eval=False):
         taskblock=[0,1]
         if len(taskblock) == len(self.encoder.blocks) or  0 in taskblock:
             latent_feat = x
+        # -grad_ckpt: recompute each block in the backward pass instead of storing its activations.
+        # Same results, far less GPU memory (needed for batch 128 on a 16 GB T4).
+        ckpt = getattr(self.args, 'grad_ckpt', False) and self.training and torch.is_grad_enabled()
+        run = (lambda f, *a: checkpoint(f, *a, use_reentrant=False)) if ckpt else (lambda f, *a: f(*a))
         for block_idx, block in enumerate(self.encoder.blocks):
             if block_idx in taskblock:
-                latent_feat = self._pk_tuning(block, latent_feat, prefix_tkn[taskblock.index(block_idx)], eval=eval)
+                latent_feat = run(lambda h, p, blk=block: self._pk_tuning(blk, h, p, eval=eval),   # blk bound now: recompute runs later
+                                  latent_feat, prefix_tkn[taskblock.index(block_idx)])
             elif block_idx == 0:
-                latent_feat = block(x)
+                latent_feat = run(block, x)
             else:
-                latent_feat = block(latent_feat)
+                latent_feat = run(block, latent_feat)
         
         feat = self.encoder.norm(latent_feat)
         return feat
@@ -254,7 +281,9 @@ class ViT_MYNET(nn.Module):
                     loss = loss_ce + loss_kb
                 else:
                     loss = loss_ce
-                
+                if not torch.isfinite(loss):   # stop at once instead of training on NaN
+                    raise FloatingPointError(f'Non-finite loss in session {session}, epoch {epoch}: {loss.item()}')
+
                 optim.zero_grad()
                 loss.backward()
                 
